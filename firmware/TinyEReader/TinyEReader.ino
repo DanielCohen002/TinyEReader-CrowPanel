@@ -3,11 +3,17 @@
   Elecrow CrowPanel ESP32 E-Paper HMI 2.13" (model DIE01021S, SSD1680Z/JD79661)
 
   Features:
-  - Creates a Wi-Fi upload page at http://192.168.4.1
-  - Multi-book library: each upload adds a book instead of replacing one
+  - Wi-Fi upload page at http://192.168.4.1, only powered on while the
+    Connect to Wi-Fi screen is showing -- off the rest of the time to save
+    battery, including at boot
+  - Multi-book library: each upload adds a book instead of replacing one.
+    Hold Back on a highlighted book in Choose Book to delete it
   - Remembers reading position per book, boots straight into the last book read
   - Real page-start history so Back goes to the actual previous page
-  - Home menu (Resume Last Book / Choose Book / Connect to Wi-Fi)
+  - Chapter skip (Top/Bottom while reading) using form-feed markers a book
+    may contain -- see tools/epub_to_txt.py
+  - Home menu (Resume Last Book / Choose Book / Connect to Wi-Fi), each
+    screen showing free space remaining out of the 1.5MB library partition
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
     wakes on any button press
 
@@ -48,7 +54,9 @@ const char* AP_PASS = "12345678";
 constexpr size_t MAX_BOOK_SIZE = 600 * 1024;  // per book; LittleFS partition is 1.5MB total
 constexpr uint16_t PAGE_HISTORY_LIMIT = 128;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
-constexpr uint8_t MAX_BOOKS = 6;  // library list isn't scrollable yet -- keep it to what fits on screen
+constexpr uint8_t MAX_BOOKS = 5;  // library list isn't scrollable yet -- keep it to what fits on screen
+                                   // (one row of the Choose Book screen is a free-space header)
+constexpr unsigned long DELETE_HOLD_MS = 800;  // hold Back this long on Choose Book to delete
 
 // Book text layout (8x16 font). 6 lines is the max that fits at all: the
 // 12x24 font this used to be set to is exactly 24px tall, and 6 * 24 = 144
@@ -135,6 +143,13 @@ String bookPath(const String& name) {
 
 String posPath(const String& name) {
   return "/books/" + name + ".pos";
+}
+
+String freeSpaceLabel() {
+  size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%uKB free", (unsigned)(freeBytes / 1024));
+  return String(buf);
 }
 
 // A full EPD_Init/ALL_Fill/Update/Clear_R26H cycle flashes the whole panel
@@ -251,6 +266,30 @@ void listBooks() {
   }
 }
 
+void renderChooseBook();
+
+void deleteSelectedBook() {
+  if (bookCount == 0) return;
+  String name = bookList[chooseSelection];
+
+  if (name == currentBookName) {
+    if (book) book.close();
+    currentBookName = "";
+    LittleFS.remove("/current.txt");
+  }
+
+  LittleFS.remove(bookPath(name));
+  LittleFS.remove(posPath(name));
+
+  listBooks();
+  if (bookCount == 0) {
+    chooseSelection = 0;
+  } else if (chooseSelection >= bookCount) {
+    chooseSelection = bookCount - 1;
+  }
+  renderChooseBook();
+}
+
 void pushHistory(uint32_t offset) {
   if (historyCount > 0 && pageHistory[historyCount - 1] == offset) return;
 
@@ -329,6 +368,7 @@ void setupAP() {
 }
 
 void handleRoot() {
+  touchActivity();
   server.send(200, "text/html", uploadPage);
 }
 
@@ -353,6 +393,7 @@ size_t uploadSizeLimit = 0;
 void handleUpload() {
   HTTPUpload& upload = server.upload();
   static File incoming;
+  touchActivity();  // keep a long upload from being interrupted by sleep
 
   if (upload.status == UPLOAD_FILE_START) {
     tooLarge = false;
@@ -401,9 +442,17 @@ void handleUploadComplete() {
   server.send(200, "text/plain", "Upload complete: " + uploadName);
 }
 
-void setupWebServer() {
+// Routes are registered once, at boot, regardless of Wi-Fi state --
+// registering them doesn't require Wi-Fi to be up. setupWebServer() itself
+// gets called every time the Wi-Fi screen is entered (and after waking from
+// sleep while on it), so it only starts/stops listening; re-registering the
+// same routes on every visit would leak a RequestHandler node each time.
+void registerWebRoutes() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/upload", HTTP_POST, handleUploadComplete, handleUpload);
+}
+
+void setupWebServer() {
   server.begin();
 }
 
@@ -520,21 +569,28 @@ void renderHome() {
     label += HOME_ITEMS[i];
     EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + i * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
   }
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (HOME_ITEM_COUNT + 1) * MENU_LINE_HEIGHT,
+                 freeSpaceLabel().c_str(), BLACK, MENU_FONT);
   endFrame();
 }
 
+// Row 0 is a free-space header; the book list starts one row down. Hold
+// Back for DELETE_HOLD_MS on a highlighted book to delete it (handled in
+// handleButtons()) -- a short tap opens it instead, same as before.
 void renderChooseBook() {
   beginFrame();
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, freeSpaceLabel().c_str(), BLACK, MENU_FONT);
+
   if (bookCount == 0) {
-    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "No books yet.", BLACK, MENU_FONT);
-    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, "Upload one first.", BLACK, MENU_FONT);
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, "No books yet.", BLACK, MENU_FONT);
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, "Upload one first.", BLACK, MENU_FONT);
   } else {
     for (uint8_t i = 0; i < bookCount; i++) {
       String label = (i == chooseSelection) ? "> " : "  ";
       String name = bookList[i];
       if (name.length() > 26) name = name.substring(0, 23) + "...";
       label += name;
-      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + i * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (i + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
     }
   }
   endFrame();
@@ -552,6 +608,21 @@ void renderWifiInfo() {
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 3 * MENU_LINE_HEIGHT, "Then open:", BLACK, MENU_FONT);
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, "192.168.4.1", BLACK, MENU_FONT);
   endFrame();
+}
+
+// Wi-Fi only runs while this screen is showing, to save battery -- it's off
+// the rest of the time, including at boot.
+void enterWifiInfo() {
+  currentScreen = SCREEN_WIFI_INFO;
+  setupAP();
+  setupWebServer();
+  touchActivity();
+  renderWifiInfo();
+}
+
+void exitWifiInfo() {
+  server.stop();
+  WiFi.mode(WIFI_OFF);
 }
 
 void enterHome() {
@@ -575,8 +646,7 @@ void selectHomeItem() {
       renderChooseBook();
       break;
     case 2:  // Connect to Wi-Fi
-      currentScreen = SCREEN_WIFI_INFO;
-      renderWifiInfo();
+      enterWifiInfo();
       break;
   }
 }
@@ -588,6 +658,8 @@ void handleButtons() {
   static bool lastDialDown = false;
   static bool lastDialUp = false;
   static bool lastDialPress = false;
+  static unsigned long backHoldStart = 0;
+  static bool backHoldHandled = false;
 
   bool nowMenu = pressed(BTN_MENU);
   bool nowBack = pressed(BTN_BACK);
@@ -596,12 +668,30 @@ void handleButtons() {
   bool nowDialPress = pressed(DIAL_PRESS);
 
   bool menuTapped = nowMenu && !lastMenu;
-  bool backTapped = nowBack && !lastBack;
   bool dialDownTapped = nowDialDown && !lastDialDown;
   bool dialUpTapped = nowDialUp && !lastDialUp;
   bool dialPressTapped = nowDialPress && !lastDialPress;
 
-  if (menuTapped || backTapped || dialDownTapped || dialUpTapped || dialPressTapped) touchActivity();
+  // Back gets hold-tracking instead of a plain edge trigger, so Choose Book
+  // can tell a normal tap (open the book) from a deliberate hold (delete
+  // it). backTapped only fires if Back is released before the hold
+  // threshold; backLongPress fires once, the moment the threshold is
+  // crossed, while Back is still held down.
+  bool backTapped = false;
+  bool backLongPress = false;
+  if (nowBack && !lastBack) {
+    backHoldStart = millis();
+    backHoldHandled = false;
+  } else if (nowBack && lastBack && !backHoldHandled && millis() - backHoldStart >= DELETE_HOLD_MS) {
+    backLongPress = true;
+    backHoldHandled = true;
+  } else if (!nowBack && lastBack && !backHoldHandled) {
+    backTapped = true;
+  }
+
+  if (menuTapped || backTapped || backLongPress || dialDownTapped || dialUpTapped || dialPressTapped) {
+    touchActivity();
+  }
 
   switch (currentScreen) {
     case SCREEN_READING:
@@ -638,13 +728,18 @@ void handleButtons() {
           chooseSelection = (chooseSelection + bookCount - 1) % bookCount;
           renderChooseBook();
         }
-        if (backTapped || dialPressTapped) openBook(bookList[chooseSelection]);
+        if (dialPressTapped) openBook(bookList[chooseSelection]);
+        if (backTapped) openBook(bookList[chooseSelection]);
+        if (backLongPress) deleteSelectedBook();
       }
       if (menuTapped) enterHome();
       break;
 
     case SCREEN_WIFI_INFO:
-      if (menuTapped || backTapped || dialPressTapped) enterHome();
+      if (menuTapped || backTapped || dialPressTapped) {
+        exitWifiInfo();
+        enterHome();
+      }
       break;
   }
 
@@ -658,9 +753,13 @@ void handleButtons() {
 void maybeSleep() {
   if (millis() - lastActivity < SLEEP_AFTER_MS) return;
 
+  // Wi-Fi is normally already off (it only runs while SCREEN_WIFI_INFO is
+  // showing) -- only tear it down/restore it here if that's where we are.
+  bool wifiActive = (currentScreen == SCREEN_WIFI_INFO);
+
   EPD_Sleep();
   epdNeedsFullInit = true;  // the panel needs a hardware reset to wake back up
-  WiFi.mode(WIFI_OFF);
+  if (wifiActive) exitWifiInfo();
   btStop();
 
   uint64_t wakeMask = (1ULL << BTN_MENU) | (1ULL << BTN_BACK) | (1ULL << DIAL_DOWN) |
@@ -669,8 +768,10 @@ void maybeSleep() {
   esp_light_sleep_start();
 
   touchActivity();
-  setupAP();
-  setupWebServer();
+  if (wifiActive) {
+    setupAP();
+    setupWebServer();
+  }
   // The e-paper stays asleep until the next render call wakes it; the panel
   // keeps showing the last image in the meantime since it is bistable.
 }
@@ -694,8 +795,11 @@ void setup() {
   }
   if (!LittleFS.exists("/books")) LittleFS.mkdir("/books");
 
-  setupAP();
-  setupWebServer();
+  registerWebRoutes();
+
+  // Wi-Fi stays off until the user opens the Connect to Wi-Fi screen -- see
+  // enterWifiInfo()/exitWifiInfo() -- to save battery the rest of the time.
+  WiFi.mode(WIFI_OFF);
 
   currentBookName = loadCurrentBookName();
   if (currentBookName.length() == 0 || !LittleFS.exists(bookPath(currentBookName))) {
