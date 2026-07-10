@@ -29,6 +29,7 @@ void EPD_PartUpdate(void);
 void EPD_Clear_R26H(void);
 void EPD_ALL_Fill(uint8_t color);
 void EPD_DisplayImage(const uint8_t *ImageBW);
+void EPD_SyncOldData(const uint8_t *ImageBW);
 void EPD_Init(void);
 void EPD_HW_Init_Fast(void);
 #endif

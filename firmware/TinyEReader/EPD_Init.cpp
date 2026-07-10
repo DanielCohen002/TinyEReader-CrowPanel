@@ -194,6 +194,26 @@ void EPD_DisplayImage(const uint8_t *ImageBW)
   }
 }
 
+/**
+   @brief       Copy the given image into register 0x26, the "previous frame"
+                reference the panel diffs against on the next partial update
+   @param       ImageBW: image buffer that was just displayed
+   @retval      none
+   @note        Call this right after EPD_PartUpdate() so R26H always matches
+                what's actually on screen. Without it, partial updates diff
+                against a stale reference and old/new content visibly blend
+                together instead of cleanly replacing each other.
+*/
+void EPD_SyncOldData(const uint8_t *ImageBW)
+{
+  uint32_t i;
+  EPD_WR_REG(0x26);
+  for (i = 0; i < ALLSCREEN_BYTES; i++)
+  {
+    EPD_WR_DATA8(~ImageBW[i]);
+  }
+}
+
 void EPD_Init(void)
 {
   EPD_GPIOInit();
