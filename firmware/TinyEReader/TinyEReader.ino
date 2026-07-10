@@ -28,11 +28,14 @@
 
 // ---------------- HARDWARE CONFIG ----------------
 // Button/dial pins per Elecrow's own examples (2.13_key.ino) and product wiki.
-#define BTN_MENU     2   // top button: HOME/MENU
-#define BTN_BACK     1   // bottom button: EXIT/BACK, doubles as SELECT in menus
-#define DIAL_DOWN    4   // NEXT / move selection down
-#define DIAL_UP      6   // PREV / move selection up
-#define DIAL_PRESS   5   // OK/CONF, doubles as SELECT in menus
+// While reading a book: top = previous chapter, bottom = next chapter,
+// dial rotate = page turn, dial press = Home. In menus: top/bottom/dial
+// press mean Back/Select as documented on each screen's handler below.
+#define BTN_MENU     2   // top button
+#define BTN_BACK     1   // bottom button
+#define DIAL_DOWN    4   // dial rotate down
+#define DIAL_UP      6   // dial rotate up
+#define DIAL_PRESS   5   // dial press
 
 #define EPD_POWER_PIN 7  // Must be driven HIGH or the panel stays blank.
 
@@ -83,6 +86,14 @@ uint32_t pageEnd = 0;
 uint32_t pageHistory[PAGE_HISTORY_LIMIT];
 uint16_t historyCount = 0;
 unsigned long lastActivity = 0;
+
+// Chapter boundaries are marked in the uploaded .txt with a form-feed byte
+// (0x0C, '\f') -- see tools/epub_to_txt.py, which inserts one at each
+// detected chapter heading when converting an EPUB. Plain hand-typed .txt
+// files with no form feeds just get a single implicit "chapter" at offset 0.
+constexpr uint16_t MAX_CHAPTERS = 200;
+uint32_t chapterOffsets[MAX_CHAPTERS];
+uint16_t chapterCount = 0;
 
 const char uploadPage[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -255,12 +266,55 @@ uint32_t popHistory() {
 
 void renderPageAt(uint32_t offset, bool rememberPrevious);
 
+// Scans the whole book once for form-feed chapter markers and records their
+// byte offsets. Called once per book-open, not per page -- a full linear
+// scan on every page turn would be needlessly slow.
+void indexChapters() {
+  chapterCount = 0;
+  chapterOffsets[chapterCount++] = 0;  // implicit chapter 0 at the very start
+
+  if (!book) return;
+
+  book.seek(0);
+  uint32_t offset = 0;
+  while (book.available() && chapterCount < MAX_CHAPTERS) {
+    int c = book.read();
+    offset++;
+    if (c == '\f') {
+      chapterOffsets[chapterCount++] = offset;
+    }
+  }
+  // No need to restore the read position here -- every caller of
+  // indexChapters() immediately follows it with renderPageAt(), which
+  // reopens and re-seeks the book itself.
+}
+
+void nextChapter() {
+  for (uint16_t i = 0; i < chapterCount; i++) {
+    if (chapterOffsets[i] > pageStart) {
+      renderPageAt(chapterOffsets[i], true);
+      return;
+    }
+  }
+}
+
+void previousChapter() {
+  for (int16_t i = (int16_t)chapterCount - 1; i >= 0; i--) {
+    if (chapterOffsets[i] < pageStart) {
+      renderPageAt(chapterOffsets[i], true);
+      return;
+    }
+  }
+  if (chapterCount > 0) renderPageAt(chapterOffsets[0], true);
+}
+
 void openBook(const String& name) {
   currentBookName = name;
   saveCurrentBookName();
   historyCount = 0;
   uint32_t saved = loadSavedPosition(name);
   reopenBookAt(saved);
+  indexChapters();
   currentScreen = SCREEN_READING;
   renderPageAt(saved, false);
 }
@@ -354,6 +408,10 @@ void setupWebServer() {
 // Greedy word-wrap: build the line word by word and stop before a word that
 // would overflow BOOK_CHARS_PER_LINE, instead of cutting mid-word. If a word
 // won't fit, seek back to its start so it becomes the start of the next line.
+// '\f' (form feed) is a chapter marker inserted by tools/epub_to_txt.py --
+// it's treated like a hard line break here but never printed, since
+// EPD_ShowString would otherwise just silently stop rendering at it (it's
+// below the printable ASCII range the font covers).
 String readWrappedLine() {
   String line;
 
@@ -361,7 +419,7 @@ String readWrappedLine() {
     while (book.available() && book.peek() == ' ') book.read();
 
     if (!book.available()) break;
-    if (book.peek() == '\n') {
+    if (book.peek() == '\n' || book.peek() == '\f') {
       book.read();
       break;
     }
@@ -370,7 +428,7 @@ String readWrappedLine() {
     String word;
     while (book.available()) {
       char c = book.peek();
-      if (c == ' ' || c == '\n' || c == '\r') break;
+      if (c == ' ' || c == '\n' || c == '\r' || c == '\f') break;
       word += (char)book.read();
     }
 
@@ -396,7 +454,7 @@ String readWrappedLine() {
     line += word;
 
     if (book.available() && book.peek() == '\r') book.read();
-    if (book.available() && book.peek() == '\n') {
+    if (book.available() && (book.peek() == '\n' || book.peek() == '\f')) {
       book.read();
       break;
     }
@@ -544,9 +602,11 @@ void handleButtons() {
 
   switch (currentScreen) {
     case SCREEN_READING:
-      if (dialDownTapped || dialPressTapped) nextPage();
-      if (dialUpTapped || backTapped) previousPage();
-      if (menuTapped) enterHome();
+      if (dialDownTapped) nextPage();
+      if (dialUpTapped) previousPage();
+      if (dialPressTapped) enterHome();
+      if (menuTapped) previousChapter();
+      if (backTapped) nextChapter();
       break;
 
     case SCREEN_HOME:
@@ -642,6 +702,7 @@ void setup() {
 
   uint32_t saved = currentBookName.length() > 0 ? loadSavedPosition(currentBookName) : 0;
   reopenBookAt(saved);
+  indexChapters();
   currentScreen = SCREEN_READING;
   renderPageAt(saved, false);
 }
