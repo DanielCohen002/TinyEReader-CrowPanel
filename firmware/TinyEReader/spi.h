@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-//项目板子
+// Board pins
 #define SCK 12
 #define MOSI 11
 #define RES 10
@@ -11,7 +11,7 @@
 #define CS 14
 #define BUSY 9
 
-/* 定义端口电平状态 */
+/* Pin level helpers */
 #define EPD_SCK_Clr() digitalWrite(SCK, LOW)
 #define EPD_SCK_Set() digitalWrite(SCK, HIGH)
 
@@ -29,7 +29,7 @@
 
 #define EPD_ReadBUSY digitalRead(BUSY)
 
-/* 函数声明 */
+/* Function declarations */
 void EPD_GPIOInit(void);
 void EPD_WR_Bus(uint8_t dat);
 void EPD_WR_REG(uint8_t reg);
