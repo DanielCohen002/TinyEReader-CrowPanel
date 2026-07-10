@@ -50,13 +50,16 @@ constexpr uint16_t PAGE_HISTORY_LIMIT = 128;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
 constexpr uint8_t MAX_BOOKS = 6;  // library list isn't scrollable yet -- keep it to what fits on screen
 
-// Book text layout (12x24 font -- big enough to use nearly the full 122px height).
+// Book text layout (8x16 font). 6 lines is the max that fits at all: the
+// 12x24 font this used to be set to is exactly 24px tall, and 6 * 24 = 144
+// is taller than the 122px screen -- there's no way to fit 6 lines of that
+// size without rows overlapping. 16px is the next font size down.
 constexpr uint16_t BOOK_LEFT_MARGIN = 4;
 constexpr uint16_t BOOK_TOP_MARGIN = 1;
-constexpr uint16_t BOOK_LINE_HEIGHT = 24;
-constexpr uint8_t BOOK_FONT = 24;
-constexpr uint8_t BOOK_CHARS_PER_LINE = 20;
-constexpr uint8_t BOOK_MAX_LINES = 5;
+constexpr uint16_t BOOK_LINE_HEIGHT = 20;
+constexpr uint8_t BOOK_FONT = 16;
+constexpr uint8_t BOOK_CHARS_PER_LINE = 30;
+constexpr uint8_t BOOK_MAX_LINES = 6;
 
 // Menu screen layout (8x16 font -- smaller, so list items/labels fit comfortably).
 constexpr uint16_t MENU_LEFT_MARGIN = 6;
