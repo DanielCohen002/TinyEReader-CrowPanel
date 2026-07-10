@@ -46,6 +46,14 @@
 #include <LittleFS.h>
 #include "EPD.h"
 
+// 1-bit icon/QR bitmaps in EPD_ShowPicture's packed format, generated with
+// tools/image_to_epd.py from hand-drawn Piskel files and QR PNGs.
+#include "generated/icon_book.h"
+#include "generated/icon_bookshelf.h"
+#include "generated/icon_wifi.h"
+#include "generated/qr_wifi.h"
+#include "generated/qr_webpage.h"
+
 // ---------------- HARDWARE CONFIG ----------------
 // Button/dial pins per Elecrow's own examples (2.13_key.ino) and product wiki.
 // While reading a book: top = previous chapter, bottom = next chapter,
@@ -716,12 +724,17 @@ void previousPage() {
 }
 
 // ---------------- MENUS ----------------
+const uint8_t* HOME_ICONS[] = { iconBook, iconBookshelf, iconWifi };
+
 void renderHome() {
   beginFrame();
   for (uint8_t i = 0; i < HOME_ITEM_COUNT; i++) {
+    uint16_t y = MENU_TOP_MARGIN + i * MENU_LINE_HEIGHT;
+    EPD_ShowPicture(MENU_LEFT_MARGIN, y, ICONBOOK_W, ICONBOOK_H, HOME_ICONS[i], BLACK);
+
     String label = (i == homeSelection) ? "> " : "  ";
     label += HOME_ITEMS[i];
-    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + i * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+    EPD_ShowString(MENU_LEFT_MARGIN + ICONBOOK_W + 2, y, label.c_str(), BLACK, MENU_FONT);
   }
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (HOME_ITEM_COUNT + 1) * MENU_LINE_HEIGHT,
                  freeSpaceLabel().c_str(), BLACK, MENU_FONT);
@@ -752,15 +765,19 @@ void renderChooseBook() {
 
 void renderWifiInfo() {
   beginFrame();
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "Connect to Wi-Fi:", BLACK, MENU_FONT);
-  String ssidLine = "SSID: ";
-  ssidLine += AP_NAME;
-  String passLine = "Pass: ";
-  passLine += AP_PASS;
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, ssidLine.c_str(), BLACK, MENU_FONT);
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, passLine.c_str(), BLACK, MENU_FONT);
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 3 * MENU_LINE_HEIGHT, "Then open:", BLACK, MENU_FONT);
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, "192.168.4.1", BLACK, MENU_FONT);
+
+  constexpr uint16_t leftX = 4;
+  constexpr uint16_t rightX = leftX + QRWIFI_W + 8;
+  constexpr uint16_t qrY = 20;
+
+  EPD_ShowString(leftX, 2, "Wi-Fi", BLACK, MENU_FONT);
+  EPD_ShowPicture(leftX, qrY, QRWIFI_W, QRWIFI_H, qrWifi, BLACK);
+
+  EPD_ShowString(rightX, 2, "Web", BLACK, MENU_FONT);
+  EPD_ShowPicture(rightX, qrY, QRWEBPAGE_W, QRWEBPAGE_H, qrWebpage, BLACK);
+
+  EPD_ShowString(leftX, qrY + QRWIFI_H + 4, "192.168.4.1", BLACK, MENU_FONT);
+
   endFrame();
 }
 
