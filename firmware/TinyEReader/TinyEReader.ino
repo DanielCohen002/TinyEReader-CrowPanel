@@ -531,9 +531,16 @@ String utf8ToAsciiReplacement(uint8_t leadByte) {
 //
 // '\r' is ignored wherever it appears -- just part of a \r\n pair or a
 // stray leftover either way. '\f' is a chapter marker inserted by
-// tools/epub_to_txt.py and is always a hard break, same as before.
-String readWrappedLine() {
+// tools/epub_to_txt.py and is always a hard break, same as before -- and
+// also signals the *page* it's on should end there too (see
+// hitChapterBreak/computePageEnd): otherwise a chapter's last page keeps
+// pulling in lines from the next chapter to fill out a full page, silently
+// mixing the two chapters together with no visual break, and throwing off
+// exactly how far back that page's start is by however many extra lines
+// of the next chapter it absorbed.
+String readWrappedLine(bool* hitChapterBreak = nullptr) {
   String line;
+  if (hitChapterBreak) *hitChapterBreak = false;
 
   while (true) {
     while (book.available() && (book.peek() == ' ' || book.peek() == '\r')) book.read();
@@ -542,6 +549,7 @@ String readWrappedLine() {
 
     if (book.peek() == '\f') {
       book.read();
+      if (hitChapterBreak) *hitChapterBreak = true;
       break;
     }
 
@@ -609,9 +617,11 @@ uint32_t computePageEnd(uint32_t offset, String* outLines, uint8_t* outLineCount
 
   uint8_t lineCount = 0;
   while (book.available() && lineCount < BOOK_MAX_LINES) {
-    String line = readWrappedLine();
+    bool hitChapterBreak = false;
+    String line = readWrappedLine(&hitChapterBreak);
     if (outLines) outLines[lineCount] = line;
     if (line.length() > 0 || book.available()) lineCount++;
+    if (hitChapterBreak) break;  // start the next chapter on a fresh page
   }
 
   if (outLineCount) *outLineCount = lineCount;
