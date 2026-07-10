@@ -114,7 +114,6 @@ WebServer server(80);
 enum AppScreen : uint8_t { SCREEN_READING, SCREEN_HOME, SCREEN_CHOOSE_BOOK, SCREEN_WIFI_INFO, SCREEN_CONFIRM_DELETE };
 AppScreen currentScreen = SCREEN_READING;
 
-const char* HOME_ITEMS[] = { "Resume Last Book", "Choose Book", "Connect to Wi-Fi" };
 constexpr uint8_t HOME_ITEM_COUNT = 3;
 uint8_t homeSelection = 0;
 
@@ -733,19 +732,33 @@ void previousPage() {
 
 // ---------------- MENUS ----------------
 const uint8_t* HOME_ICONS[] = { iconBook, iconBookshelf, iconWifi };
+const char* HOME_SHORT_LABELS[] = { "Read", "Books", "Wi-Fi" };
+
+// Icon-first layout: a row of three 32x32 icons with a small label under
+// each, centered as a block in the 250x122 screen, selection shown as a
+// border box rather than a "> " prefix (there's no list to prefix here).
+constexpr uint16_t HOME_ICON_SIZE = 32;
+constexpr uint16_t HOME_ICON_Y = 38;
+constexpr uint8_t HOME_LABEL_FONT = 12;  // 6x12 -- deliberately small/secondary to the icon
+constexpr uint16_t HOME_LABEL_Y = HOME_ICON_Y + HOME_ICON_SIZE + 4;
+const uint16_t HOME_ICON_X[HOME_ITEM_COUNT] = { 20, 109, 198 };  // evenly spaced, symmetric margins
 
 void renderHome() {
   beginFrame();
   for (uint8_t i = 0; i < HOME_ITEM_COUNT; i++) {
-    uint16_t y = MENU_TOP_MARGIN + i * MENU_LINE_HEIGHT;
-    EPD_ShowPicture(MENU_LEFT_MARGIN, y, ICONBOOK_W, ICONBOOK_H, HOME_ICONS[i], BLACK);
+    uint16_t x = HOME_ICON_X[i];
+    EPD_ShowPicture(x, HOME_ICON_Y, HOME_ICON_SIZE, HOME_ICON_SIZE, HOME_ICONS[i], BLACK);
 
-    String label = (i == homeSelection) ? "> " : "  ";
-    label += HOME_ITEMS[i];
-    EPD_ShowString(MENU_LEFT_MARGIN + ICONBOOK_W + 2, y, label.c_str(), BLACK, MENU_FONT);
+    const char* label = HOME_SHORT_LABELS[i];
+    uint16_t labelWidth = strlen(label) * (HOME_LABEL_FONT / 2);
+    uint16_t labelX = x + (HOME_ICON_SIZE - labelWidth) / 2;
+    EPD_ShowString(labelX, HOME_LABEL_Y, label, BLACK, HOME_LABEL_FONT);
+
+    if (i == homeSelection) {
+      EPD_DrawRectangle(x - 4, HOME_ICON_Y - 4, x + HOME_ICON_SIZE + 4,
+                         HOME_LABEL_Y + HOME_LABEL_FONT + 2, BLACK);
+    }
   }
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (HOME_ITEM_COUNT + 1) * MENU_LINE_HEIGHT,
-                 freeSpaceLabel().c_str(), BLACK, MENU_FONT);
   endFrame();
 }
 

@@ -49,11 +49,15 @@ def to_1bit(img, size=None, threshold=128, invert=False):
         img = Image.alpha_composite(bg, img)
     img = img.convert("L")
 
-    if size:
+    if size and size < img.width:
         # BOX averages each target pixel over its source region instead of
         # sampling a single source pixel -- important for QR codes, where a
         # bad single-pixel sample near a module edge can flip that module.
         img = img.resize((size, size), Image.BOX)
+    elif size and size > img.width:
+        # NEAREST for upscaling keeps hand-drawn pixel art crisp and blocky
+        # (clean pixel-doubling/tripling) instead of blurring it.
+        img = img.resize((size, size), Image.NEAREST)
 
     px = img.point(lambda p: 255 if p >= threshold else 0)
     bitmap = px.point(lambda p: 0 if p >= threshold else 1)  # 1 = dark/foreground

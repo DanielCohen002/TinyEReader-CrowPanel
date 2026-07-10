@@ -10,7 +10,7 @@ Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between ch
 - Remembers your reading position per book, boots straight back into whichever book you read last
 - True sequential page-up/page-down (always the actual neighboring page, computed by replaying pagination rather than an undo-last-jump stack) — see [Display driver](#display-driver)
 - Chapter skip, using a marker character a book can contain — see [Chapters](#chapters-and-the-epub-converter) below
-- Home menu: Resume Last Book / Choose Book / Connect to Wi-Fi, each with its own icon, each screen showing free space left in the library
+- Home menu: a row of three icons (Resume Last Book / Choose Book / Connect to Wi-Fi) with small labels underneath, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
 - Delete a book from Choose Book via a Yes/No confirmation dialog
 - Two QR codes on the Connect to Wi-Fi screen — one auto-joins the `PocketReader` network, one links out to the project — generated from PNGs with `tools/image_to_epd.py`
 - Wi-Fi only powers on while the Connect to Wi-Fi screen is open — off the rest of the time (including at boot) to save battery
