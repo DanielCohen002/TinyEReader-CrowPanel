@@ -93,17 +93,24 @@ void touchActivity() {
   lastActivity = millis();
 }
 
-// Elecrow's own repeated-refresh demos (UI_price() in their WIFI/BLE examples)
-// always run this exact sequence before drawing a new frame, even for
-// "partial" updates: full white fill + full update + clear the R26H previous-
-// frame register. Skipping that between page turns leaves stale pixels in
-// R26H, so the panel's partial-refresh LUT blends old and new text together
-// (the "overlapping words" symptom).
+// A full EPD_Init/ALL_Fill/Update/Clear_R26H cycle flashes the whole panel
+// and is only actually needed once after power-on, or after the panel has
+// been put to sleep (it needs a hardware reset to wake back up). Running
+// that full cycle before every single page turn -- which the first version
+// of this fix did, to work around ghosting -- made every page flash several
+// times and feel sluggish. The real fix for ghosting is EPD_SyncOldData:
+// keeping the "previous frame" register (R26H) in sync with what's actually
+// on screen so each partial update diffs against the right reference.
+bool epdNeedsFullInit = true;
+
 void beginFrame() {
-  EPD_Init();
-  EPD_ALL_Fill(WHITE);
-  EPD_Update();
-  EPD_Clear_R26H();
+  if (epdNeedsFullInit) {
+    EPD_Init();
+    EPD_ALL_Fill(WHITE);
+    EPD_Update();
+    EPD_Clear_R26H();
+    epdNeedsFullInit = false;
+  }
 
   // In the ImageBW software framebuffer (as opposed to the raw WHITE/BLACK
   // register values above), a set bit means BLACK and a clear bit means
@@ -115,6 +122,7 @@ void beginFrame() {
 void endFrame() {
   EPD_DisplayImage(ImageBW);
   EPD_PartUpdate();
+  EPD_SyncOldData(ImageBW);
 }
 
 void showMessage(const String& message) {
@@ -240,26 +248,53 @@ void setupWebServer() {
 }
 
 // ---------------- READER ----------------
+// Greedy word-wrap: build the line word by word and stop before a word that
+// would overflow CHARS_PER_LINE, instead of cutting mid-word. If a word won't
+// fit, seek back to its start so it becomes the start of the next line.
 String readWrappedLine() {
   String line;
 
-  while (book.available()) {
-    char c = book.read();
+  while (true) {
+    while (book.available() && book.peek() == ' ') book.read();
 
-    if (c == '\r') continue;
-    if (c == '\n') break;
+    if (!book.available()) break;
+    if (book.peek() == '\n') {
+      book.read();
+      break;
+    }
 
-    line += c;
-    if (line.length() >= CHARS_PER_LINE) {
-      while (book.available()) {
-        char next = book.peek();
-        if (next == ' ' || next == '\n' || next == '\r') {
-          book.read();
-          if (next == '\n') break;
-        } else {
-          break;
-        }
+    uint32_t wordStart = book.position();
+    String word;
+    while (book.available()) {
+      char c = book.peek();
+      if (c == ' ' || c == '\n' || c == '\r') break;
+      word += (char)book.read();
+    }
+
+    if (word.length() > CHARS_PER_LINE) {
+      // Single word longer than a whole line (long URL, etc): hard-break it
+      // rather than looping forever. Flush whatever we already have first so
+      // the long word starts cleanly on its own line.
+      if (line.length() > 0) {
+        book.seek(wordStart);
+        break;
       }
+      book.seek(wordStart + CHARS_PER_LINE);
+      return word.substring(0, CHARS_PER_LINE);
+    }
+
+    uint16_t candidateLen = line.length() + (line.length() > 0 ? 1 : 0) + word.length();
+    if (candidateLen > CHARS_PER_LINE) {
+      book.seek(wordStart);
+      break;
+    }
+
+    if (line.length() > 0) line += ' ';
+    line += word;
+
+    if (book.available() && book.peek() == '\r') book.read();
+    if (book.available() && book.peek() == '\n') {
+      book.read();
       break;
     }
   }
@@ -353,6 +388,7 @@ void maybeSleep() {
   if (millis() - lastActivity < SLEEP_AFTER_MS) return;
 
   EPD_Sleep();
+  epdNeedsFullInit = true;  // the panel needs a hardware reset to wake back up
   WiFi.mode(WIFI_OFF);
   btStop();
 
