@@ -154,17 +154,208 @@ const char uploadPage[] PROGMEM = R"rawliteral(
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>PocketReader</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.35; }
-    input, button { font: inherit; margin-top: 1rem; }
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, sans-serif; line-height: 1.4; margin: 0;
+      padding: 2rem 1rem; background: #f2efe9; color: #1c1a17;
+      display: flex; justify-content: center;
+    }
+    .card {
+      width: 100%; max-width: 26rem; background: #fffdf9;
+      border-radius: 0.75rem; padding: 1.5rem 1.5rem 1.75rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    .sub { color: #6b6357; font-size: 0.9rem; margin: 0 0 1.25rem; }
+    .drop {
+      border: 2px dashed #c9c0b0; border-radius: 0.6rem; padding: 1.5rem 1rem;
+      text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s;
+    }
+    .drop.drag { border-color: #8a7a5c; background: #f6f1e6; }
+    .drop p { margin: 0.25rem 0; }
+    .drop .hint { font-size: 0.85rem; color: #8a8072; }
+    input[type=file] { display: none; }
+    button {
+      font: inherit; margin-top: 1rem; width: 100%; padding: 0.65rem;
+      border: none; border-radius: 0.5rem; background: #3d3527; color: #fff;
+      cursor: pointer;
+    }
+    button:disabled { background: #b6ac9a; cursor: not-allowed; }
+    .files { margin-top: 1rem; font-size: 0.9rem; }
+    .file-row { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.15rem 0; }
+    .file-row .status { color: #8a8072; white-space: nowrap; }
+    .file-row.done .status { color: #3c7a3c; }
+    .file-row.error .status { color: #b03a2e; }
+    h2 { font-size: 1rem; margin: 1.75rem 0 0.5rem; }
+    .lib-meta { font-size: 0.85rem; color: #6b6357; margin: 0 0 0.5rem; }
+    ul.lib { list-style: none; margin: 0; padding: 0; font-size: 0.9rem; }
+    ul.lib li { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.35rem 0; border-top: 1px solid #ece7dc; }
+    ul.lib li .size { color: #8a8072; white-space: nowrap; }
+    .empty { color: #8a8072; font-size: 0.9rem; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #171512; color: #ece7dc; }
+      .card { background: #201d19; box-shadow: none; }
+      .sub, .lib-meta, .empty, .drop .hint, .file-row .status { color: #a49b8a; }
+      .drop { border-color: #4a4438; }
+      .drop.drag { border-color: #8a7a5c; background: #2a251e; }
+      button { background: #ece7dc; color: #201d19; }
+      button:disabled { background: #4a4438; color: #a49b8a; }
+      ul.lib li { border-top-color: #332e27; }
+    }
   </style>
 </head>
 <body>
-  <h1>PocketReader</h1>
-  <p>Uploading adds a new book to your library (up to 3MB per book). It becomes the active book right away.</p>
-  <form method="POST" action="/upload" enctype="multipart/form-data">
-    <input type="file" name="file" accept=".txt,text/plain">
-    <button type="submit">Upload TXT</button>
-  </form>
+  <div class="card">
+    <h1>PocketReader</h1>
+    <p class="sub">Upload one or more .txt books (up to 3MB each). The last one uploaded becomes the active book.</p>
+
+    <form id="form">
+      <label class="drop" id="drop" for="file">
+        <p id="dropLabel">Tap to choose books</p>
+        <p class="hint">or drag &amp; drop .txt files here</p>
+      </label>
+      <input type="file" id="file" name="file" accept=".txt,text/plain" multiple>
+      <button type="submit" id="go" disabled>Upload</button>
+    </form>
+    <div class="files" id="files"></div>
+
+    <h2>Library</h2>
+    <p class="lib-meta" id="libMeta">Loading...</p>
+    <ul class="lib" id="libList"></ul>
+  </div>
+
+  <script>
+    var fileInput = document.getElementById('file');
+    var drop = document.getElementById('drop');
+    var dropLabel = document.getElementById('dropLabel');
+    var go = document.getElementById('go');
+    var filesBox = document.getElementById('files');
+    var form = document.getElementById('form');
+    var picked = [];
+    var libraryFull = false;
+
+    function fmtSize(n) {
+      if (n > 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + 'MB';
+      if (n > 1024) return Math.round(n / 1024) + 'KB';
+      return n + 'B';
+    }
+
+    function refreshLibrary() {
+      fetch('/books').then(function (r) { return r.json(); }).then(function (data) {
+        document.getElementById('libMeta').textContent =
+          data.count + ' of ' + data.max + ' books - ' + data.free;
+        var list = document.getElementById('libList');
+        list.innerHTML = '';
+        if (data.books.length === 0) {
+          var li = document.createElement('li');
+          li.className = 'empty';
+          li.textContent = 'No books yet.';
+          list.appendChild(li);
+        }
+        data.books.forEach(function (b) {
+          var li = document.createElement('li');
+          var name = document.createElement('span');
+          name.textContent = b.name;
+          var size = document.createElement('span');
+          size.className = 'size';
+          size.textContent = fmtSize(b.size);
+          li.appendChild(name);
+          li.appendChild(size);
+          list.appendChild(li);
+        });
+        libraryFull = data.count >= data.max;
+        go.disabled = picked.length === 0 || libraryFull;
+        if (libraryFull && picked.length === 0) {
+          dropLabel.textContent = 'Library full - delete a book on the device first';
+        }
+      }).catch(function () {
+        document.getElementById('libMeta').textContent = '';
+      });
+    }
+
+    function setPicked(fileList) {
+      picked = Array.prototype.filter.call(fileList, function (f) {
+        return f.name.toLowerCase().endsWith('.txt');
+      });
+      if (picked.length === 0) {
+        dropLabel.textContent = libraryFull ? 'Library full - delete a book on the device first' : 'Tap to choose books';
+      } else {
+        dropLabel.textContent = picked.length + ' book' + (picked.length > 1 ? 's' : '') + ' selected';
+      }
+      go.disabled = picked.length === 0 || libraryFull;
+      filesBox.innerHTML = '';
+    }
+
+    fileInput.addEventListener('change', function () { setPicked(fileInput.files); });
+
+    ['dragenter', 'dragover'].forEach(function (evt) {
+      drop.addEventListener(evt, function (e) { e.preventDefault(); drop.classList.add('drag'); });
+    });
+    ['dragleave', 'drop'].forEach(function (evt) {
+      drop.addEventListener(evt, function (e) { e.preventDefault(); drop.classList.remove('drag'); });
+    });
+    drop.addEventListener('drop', function (e) {
+      setPicked(e.dataTransfer.files);
+    });
+
+    function uploadOne(file, isLast) {
+      return new Promise(function (resolve) {
+        var row = document.createElement('div');
+        row.className = 'file-row';
+        var name = document.createElement('span');
+        name.textContent = file.name;
+        var status = document.createElement('span');
+        status.className = 'status';
+        status.textContent = '0%';
+        row.appendChild(name);
+        row.appendChild(status);
+        filesBox.appendChild(row);
+
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload?open=' + (isLast ? '1' : '0'));
+        xhr.upload.onprogress = function (e) {
+          if (e.lengthComputable) status.textContent = Math.round((e.loaded / e.total) * 100) + '%';
+        };
+        xhr.onload = function () {
+          if (xhr.status === 200) {
+            row.classList.add('done');
+            status.textContent = 'Done';
+          } else {
+            row.classList.add('error');
+            status.textContent = xhr.status === 413 ? 'Too large' : 'Failed';
+          }
+          resolve();
+        };
+        xhr.onerror = function () {
+          row.classList.add('error');
+          status.textContent = 'Failed';
+          resolve();
+        };
+        var data = new FormData();
+        data.append('file', file);
+        xhr.send(data);
+      });
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (picked.length === 0) return;
+      go.disabled = true;
+      filesBox.innerHTML = '';
+      var chain = Promise.resolve();
+      picked.forEach(function (file, i) {
+        chain = chain.then(function () { return uploadOne(file, i === picked.length - 1); });
+      });
+      chain.then(function () {
+        picked = [];
+        fileInput.value = '';
+        dropLabel.textContent = 'Tap to choose books';
+        refreshLibrary();
+      });
+    });
+
+    refreshLibrary();
+  </script>
 </body>
 </html>
 )rawliteral";
@@ -376,6 +567,11 @@ void previousChapter() {
 }
 
 void openBook(const String& name) {
+  // indexChapters() does a byte-by-byte scan of the whole file, which can take
+  // a couple of seconds on a large book -- show a message first so this reads
+  // as "working" rather than a frozen screen.
+  showMessage("Opening book...");
+
   currentBookName = name;
   saveCurrentBookName();
   uint32_t saved = loadSavedPosition(name);
@@ -394,6 +590,29 @@ void setupAP() {
 void handleRoot() {
   touchActivity();
   server.send(200, "text/html", uploadPage);
+}
+
+// Hand-built JSON (no ArduinoJson dependency) so the upload page can show
+// the current library without a page reload. bookCount is capped at
+// MAX_BOOKS by listBooks(), so this stays small and fast even though it
+// opens each file just to read its size.
+void handleBooksList() {
+  touchActivity();
+  listBooks();
+
+  String json = "{\"books\":[";
+  for (uint8_t i = 0; i < bookCount; i++) {
+    if (i > 0) json += ",";
+    File f = LittleFS.open(bookPath(bookList[i]), "r");
+    size_t size = f ? f.size() : 0;
+    if (f) f.close();
+    json += "{\"name\":\"" + bookList[i] + "\",\"size\":" + String(size) + "}";
+  }
+  json += "],\"count\":" + String(bookCount) +
+          ",\"max\":" + String(MAX_BOOKS) +
+          ",\"free\":\"" + freeSpaceLabel() + "\"}";
+
+  server.send(200, "application/json", json);
 }
 
 String sanitizeFilename(String name) {
@@ -462,7 +681,10 @@ void handleUploadComplete() {
     return;
   }
 
-  openBook(uploadName);
+  // The upload page batches multi-file selections into one request per file
+  // and only asks to open the last one, so picking several books doesn't
+  // flash the e-paper panel open on every single file in the batch.
+  if (server.arg("open") != "0") openBook(uploadName);
   server.send(200, "text/plain", "Upload complete: " + uploadName);
 }
 
@@ -473,6 +695,7 @@ void handleUploadComplete() {
 // same routes on every visit would leak a RequestHandler node each time.
 void registerWebRoutes() {
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/books", HTTP_GET, handleBooksList);
   server.on("/upload", HTTP_POST, handleUploadComplete, handleUpload);
 }
 
