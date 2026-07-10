@@ -44,15 +44,14 @@ const char* AP_PASS = "12345678";
 constexpr size_t MAX_FILE_SIZE = 1500 * 1024;
 constexpr uint16_t PAGE_HISTORY_LIMIT = 128;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
-constexpr uint8_t FULL_REFRESH_EVERY = 8;  // Full refresh every N pages to clear ghosting.
 
 // Text layout for the 8x16 font (EPD_W x EPD_H == 250 x 122 in landscape).
 constexpr uint16_t LEFT_MARGIN = 4;
 constexpr uint16_t TOP_MARGIN = 2;
-constexpr uint16_t LINE_HEIGHT = 16;
+constexpr uint16_t LINE_HEIGHT = 18;
 constexpr uint8_t LINE_FONT = 16;
 constexpr uint8_t CHARS_PER_LINE = 30;
-constexpr uint8_t MAX_LINES = 6;
+constexpr uint8_t MAX_LINES = 5;
 constexpr uint8_t FOOTER_FONT = 12;
 
 WebServer server(80);
@@ -63,9 +62,7 @@ uint32_t pageStart = 0;
 uint32_t pageEnd = 0;
 uint32_t pageHistory[PAGE_HISTORY_LIMIT];
 uint16_t historyCount = 0;
-uint8_t pagesSinceFullRefresh = 0;
 unsigned long lastActivity = 0;
-bool epdAwake = false;
 
 const char uploadPage[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -97,21 +94,32 @@ void touchActivity() {
   lastActivity = millis();
 }
 
-void wakeEpdIfNeeded() {
-  if (epdAwake) return;
+// Elecrow's own repeated-refresh demos (UI_price() in their WIFI/BLE examples)
+// always run this exact sequence before drawing a new frame, even for
+// "partial" updates: full white fill + full update + clear the R26H previous-
+// frame register. Skipping that between page turns leaves stale pixels in
+// R26H, so the panel's partial-refresh LUT blends old and new text together
+// (the "overlapping words" symptom).
+void beginFrame() {
   EPD_Init();
-  epdAwake = true;
+  EPD_ALL_Fill(WHITE);
+  EPD_Update();
+  EPD_Clear_R26H();
+
+  // In the ImageBW software framebuffer (as opposed to the raw WHITE/BLACK
+  // register values above), a set bit means BLACK and a clear bit means
+  // WHITE -- see EPD_DrawPoint. So "clear to white" means filling with 0x00,
+  // not the WHITE constant.
+  memset(ImageBW, 0x00, ALLSCREEN_BYTES);
 }
 
-void sleepEpd() {
-  if (!epdAwake) return;
-  EPD_Sleep();
-  epdAwake = false;
+void endFrame() {
+  EPD_DisplayImage(ImageBW);
+  EPD_PartUpdate();
 }
 
 void showMessage(const String& message) {
-  wakeEpdIfNeeded();
-  memset(ImageBW, WHITE, ALLSCREEN_BYTES);
+  beginFrame();
 
   uint16_t y = TOP_MARGIN;
   int start = 0;
@@ -124,10 +132,7 @@ void showMessage(const String& message) {
     start = (nl == -1) ? msg.length() : nl + 1;
   }
 
-  EPD_DisplayImage(ImageBW);
-  EPD_Update();
-  EPD_Clear_R26H();
-  pagesSinceFullRefresh = 0;
+  endFrame();
 }
 
 void savePosition() {
@@ -287,8 +292,7 @@ void renderPageAt(uint32_t offset, bool rememberPrevious) {
 
   pageEnd = book.position();
 
-  wakeEpdIfNeeded();
-  memset(ImageBW, WHITE, ALLSCREEN_BYTES);
+  beginFrame();
 
   for (uint8_t i = 0; i < lineCount; i++) {
     EPD_ShowString(LEFT_MARGIN, TOP_MARGIN + (i * LINE_HEIGHT), lines[i].c_str(), BLACK, LINE_FONT);
@@ -298,17 +302,7 @@ void renderPageAt(uint32_t offset, bool rememberPrevious) {
   snprintf(footer, sizeof(footer), "%lu/%lu", (unsigned long)pageEnd, (unsigned long)fileSize);
   EPD_ShowString(LEFT_MARGIN, EPD_H - FOOTER_FONT - 1, footer, BLACK, FOOTER_FONT);
 
-  EPD_DisplayImage(ImageBW);
-
-  bool doFull = pagesSinceFullRefresh >= FULL_REFRESH_EVERY;
-  if (doFull) {
-    EPD_Update();
-    EPD_Clear_R26H();
-    pagesSinceFullRefresh = 0;
-  } else {
-    EPD_PartUpdate();
-    pagesSinceFullRefresh++;
-  }
+  endFrame();
 
   savePosition();
   touchActivity();
@@ -363,7 +357,7 @@ void handleButtons() {
 void maybeSleep() {
   if (millis() - lastActivity < SLEEP_AFTER_MS) return;
 
-  sleepEpd();
+  EPD_Sleep();
   WiFi.mode(WIFI_OFF);
   btStop();
 
@@ -391,11 +385,6 @@ void setup() {
 
   pinMode(EPD_POWER_PIN, OUTPUT);
   digitalWrite(EPD_POWER_PIN, HIGH);
-
-  wakeEpdIfNeeded();
-  EPD_ALL_Fill(WHITE);
-  EPD_Update();
-  EPD_Clear_R26H();
 
   if (!LittleFS.begin(true)) {
     showMessage("LittleFS failed");
