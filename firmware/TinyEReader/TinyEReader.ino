@@ -4,9 +4,10 @@
 
   Features:
   - Creates a Wi-Fi upload page at http://192.168.4.1
-  - Accepts a plain .txt book and stores it in LittleFS
-  - Remembers reading position
+  - Multi-book library: each upload adds a book instead of replacing one
+  - Remembers reading position per book, boots straight into the last book read
   - Real page-start history so Back goes to the actual previous page
+  - Home menu (Resume Last Book / Choose Book / Connect to Wi-Fi)
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
     wakes on any button press
 
@@ -27,11 +28,11 @@
 
 // ---------------- HARDWARE CONFIG ----------------
 // Button/dial pins per Elecrow's own examples (2.13_key.ino) and product wiki.
-#define BTN_MENU     2   // HOME/MENU
-#define BTN_BACK     1   // EXIT/BACK
-#define DIAL_DOWN    4   // NEXT
-#define DIAL_UP      6   // PREV
-#define DIAL_PRESS   5   // OK/CONF
+#define BTN_MENU     2   // top button: HOME/MENU
+#define BTN_BACK     1   // bottom button: EXIT/BACK, doubles as SELECT in menus
+#define DIAL_DOWN    4   // NEXT / move selection down
+#define DIAL_UP      6   // PREV / move selection up
+#define DIAL_PRESS   5   // OK/CONF, doubles as SELECT in menus
 
 #define EPD_POWER_PIN 7  // Must be driven HIGH or the panel stays blank.
 
@@ -41,19 +42,39 @@ extern uint8_t ImageBW[ALLSCREEN_BYTES];  // Software framebuffer, defined in EP
 const char* AP_NAME = "PocketReader";
 const char* AP_PASS = "12345678";
 
-constexpr size_t MAX_FILE_SIZE = 1500 * 1024;
+constexpr size_t MAX_BOOK_SIZE = 600 * 1024;  // per book; LittleFS partition is 1.5MB total
 constexpr uint16_t PAGE_HISTORY_LIMIT = 128;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
+constexpr uint8_t MAX_BOOKS = 6;  // library list isn't scrollable yet -- keep it to what fits on screen
 
-// Text layout for the 8x16 font (EPD_W x EPD_H == 250 x 122 in landscape).
-constexpr uint16_t LEFT_MARGIN = 4;
-constexpr uint16_t TOP_MARGIN = 2;
-constexpr uint16_t LINE_HEIGHT = 18;
-constexpr uint8_t LINE_FONT = 16;
-constexpr uint8_t CHARS_PER_LINE = 30;
-constexpr uint8_t MAX_LINES = 6;
+// Book text layout (12x24 font -- big enough to use nearly the full 122px height).
+constexpr uint16_t BOOK_LEFT_MARGIN = 4;
+constexpr uint16_t BOOK_TOP_MARGIN = 1;
+constexpr uint16_t BOOK_LINE_HEIGHT = 24;
+constexpr uint8_t BOOK_FONT = 24;
+constexpr uint8_t BOOK_CHARS_PER_LINE = 20;
+constexpr uint8_t BOOK_MAX_LINES = 5;
+
+// Menu screen layout (8x16 font -- smaller, so list items/labels fit comfortably).
+constexpr uint16_t MENU_LEFT_MARGIN = 6;
+constexpr uint16_t MENU_TOP_MARGIN = 4;
+constexpr uint16_t MENU_LINE_HEIGHT = 20;
+constexpr uint8_t MENU_FONT = 16;
 
 WebServer server(80);
+
+enum AppScreen : uint8_t { SCREEN_READING, SCREEN_HOME, SCREEN_CHOOSE_BOOK, SCREEN_WIFI_INFO };
+AppScreen currentScreen = SCREEN_READING;
+
+const char* HOME_ITEMS[] = { "Resume Last Book", "Choose Book", "Connect to Wi-Fi" };
+constexpr uint8_t HOME_ITEM_COUNT = 3;
+uint8_t homeSelection = 0;
+
+String bookList[MAX_BOOKS];
+uint8_t bookCount = 0;
+uint8_t chooseSelection = 0;
+
+String currentBookName;  // filename only, e.g. "MyNovel.txt" -- lives under /books/
 
 File book;
 size_t fileSize = 0;
@@ -76,6 +97,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
 </head>
 <body>
   <h1>PocketReader</h1>
+  <p>Uploading adds a new book to your library (up to 600KB per book). It becomes the active book right away.</p>
   <form method="POST" action="/upload" enctype="multipart/form-data">
     <input type="file" name="file" accept=".txt,text/plain">
     <button type="submit">Upload TXT</button>
@@ -91,6 +113,14 @@ bool pressed(uint8_t pin) {
 
 void touchActivity() {
   lastActivity = millis();
+}
+
+String bookPath(const String& name) {
+  return "/books/" + name;
+}
+
+String posPath(const String& name) {
+  return "/books/" + name + ".pos";
 }
 
 // A full EPD_Init/ALL_Fill/Update/Clear_R26H cycle flashes the whole panel
@@ -128,29 +158,47 @@ void endFrame() {
 void showMessage(const String& message) {
   beginFrame();
 
-  uint16_t y = TOP_MARGIN;
+  uint16_t y = MENU_TOP_MARGIN;
   int start = 0;
   String msg = message;
   while (start < (int)msg.length()) {
     int nl = msg.indexOf('\n', start);
     String line = (nl == -1) ? msg.substring(start) : msg.substring(start, nl);
-    EPD_ShowString(LEFT_MARGIN, y, line.c_str(), BLACK, LINE_FONT);
-    y += LINE_HEIGHT;
+    EPD_ShowString(MENU_LEFT_MARGIN, y, line.c_str(), BLACK, MENU_FONT);
+    y += MENU_LINE_HEIGHT;
     start = (nl == -1) ? msg.length() : nl + 1;
   }
 
   endFrame();
 }
 
+// ---------------- LIBRARY ----------------
+void saveCurrentBookName() {
+  File f = LittleFS.open("/current.txt", "w");
+  if (!f) return;
+  f.print(currentBookName);
+  f.close();
+}
+
+String loadCurrentBookName() {
+  File f = LittleFS.open("/current.txt", "r");
+  if (!f) return "";
+  String name = f.readString();
+  f.close();
+  name.trim();
+  return name;
+}
+
 void savePosition() {
-  File pos = LittleFS.open("/pos.txt", "w");
+  if (currentBookName.length() == 0) return;
+  File pos = LittleFS.open(posPath(currentBookName), "w");
   if (!pos) return;
   pos.print(pageStart);
   pos.close();
 }
 
-uint32_t loadSavedPosition() {
-  File pos = LittleFS.open("/pos.txt", "r");
+uint32_t loadSavedPosition(const String& name) {
+  File pos = LittleFS.open(posPath(name), "r");
   if (!pos) return 0;
   uint32_t saved = pos.parseInt();
   pos.close();
@@ -159,12 +207,34 @@ uint32_t loadSavedPosition() {
 
 void reopenBookAt(uint32_t offset) {
   if (book) book.close();
-  book = LittleFS.open("/book.txt", "r");
+  if (currentBookName.length() == 0) {
+    fileSize = 0;
+    pageStart = 0;
+    return;
+  }
+  book = LittleFS.open(bookPath(currentBookName), "r");
   if (!book) return;
   fileSize = book.size();
   if (offset > fileSize) offset = 0;
   pageStart = offset;
   book.seek(pageStart);
+}
+
+void listBooks() {
+  bookCount = 0;
+  File dir = LittleFS.open("/books");
+  if (!dir || !dir.isDirectory()) return;
+
+  File f = dir.openNextFile();
+  while (f && bookCount < MAX_BOOKS) {
+    String name = String(f.name());
+    int slash = name.lastIndexOf('/');
+    if (slash != -1) name = name.substring(slash + 1);
+    if (name.length() > 0 && !name.endsWith(".pos")) {
+      bookList[bookCount++] = name;
+    }
+    f = dir.openNextFile();
+  }
 }
 
 void pushHistory(uint32_t offset) {
@@ -183,6 +253,18 @@ uint32_t popHistory() {
   return pageHistory[--historyCount];
 }
 
+void renderPageAt(uint32_t offset, bool rememberPrevious);
+
+void openBook(const String& name) {
+  currentBookName = name;
+  saveCurrentBookName();
+  historyCount = 0;
+  uint32_t saved = loadSavedPosition(name);
+  reopenBookAt(saved);
+  currentScreen = SCREEN_READING;
+  renderPageAt(saved, false);
+}
+
 // ---------------- WIFI + WEB ----------------
 void setupAP() {
   WiFi.mode(WIFI_AP);
@@ -193,7 +275,23 @@ void handleRoot() {
   server.send(200, "text/html", uploadPage);
 }
 
+String sanitizeFilename(String name) {
+  name.trim();
+  String out;
+  for (size_t i = 0; i < name.length() && out.length() < 40; i++) {
+    char c = name[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '-' || c == '_' || c == '.' || c == ' ';
+    if (ok) out += c;
+  }
+  if (out.length() == 0) out = "book";
+  if (!out.endsWith(".txt")) out += ".txt";
+  return out;
+}
+
 bool tooLarge = false;
+String uploadName;
+size_t uploadSizeLimit = 0;
 
 void handleUpload() {
   HTTPUpload& upload = server.upload();
@@ -201,16 +299,26 @@ void handleUpload() {
 
   if (upload.status == UPLOAD_FILE_START) {
     tooLarge = false;
-    if (LittleFS.exists("/book.txt")) LittleFS.remove("/book.txt");
-    if (LittleFS.exists("/pos.txt")) LittleFS.remove("/pos.txt");
-    incoming = LittleFS.open("/book.txt", "w");
+    uploadName = sanitizeFilename(upload.filename);
+
+    if (!LittleFS.exists("/books")) LittleFS.mkdir("/books");
+
+    size_t freeSpace = LittleFS.totalBytes() - LittleFS.usedBytes();
+    uploadSizeLimit = min((size_t)MAX_BOOK_SIZE, freeSpace > 8192 ? freeSpace - 8192 : 0);
+    if (uploadSizeLimit == 0) {
+      tooLarge = true;
+      return;
+    }
+
+    if (LittleFS.exists(posPath(uploadName))) LittleFS.remove(posPath(uploadName));
+    incoming = LittleFS.open(bookPath(uploadName), "w");
   }
 
   if (upload.status == UPLOAD_FILE_WRITE && incoming && !tooLarge) {
-    if (incoming.size() + upload.currentSize > MAX_FILE_SIZE) {
+    if (incoming.size() + upload.currentSize > uploadSizeLimit) {
       tooLarge = true;
       incoming.close();
-      LittleFS.remove("/book.txt");
+      LittleFS.remove(bookPath(uploadName));
       return;
     }
     incoming.write(upload.buf, upload.currentSize);
@@ -228,17 +336,12 @@ void handleUpload() {
 // headers (ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_LENGTH in Chrome).
 void handleUploadComplete() {
   if (tooLarge) {
-    server.send(413, "text/plain", "File too large");
+    server.send(413, "text/plain", "File too large or library full (limit 600KB per book)");
     return;
   }
 
-  historyCount = 0;
-  pageStart = 0;
-  pageEnd = 0;
-  reopenBookAt(0);
-  renderPageAt(0, false);
-
-  server.send(200, "text/plain", "Upload complete");
+  openBook(uploadName);
+  server.send(200, "text/plain", "Upload complete: " + uploadName);
 }
 
 void setupWebServer() {
@@ -249,8 +352,8 @@ void setupWebServer() {
 
 // ---------------- READER ----------------
 // Greedy word-wrap: build the line word by word and stop before a word that
-// would overflow CHARS_PER_LINE, instead of cutting mid-word. If a word won't
-// fit, seek back to its start so it becomes the start of the next line.
+// would overflow BOOK_CHARS_PER_LINE, instead of cutting mid-word. If a word
+// won't fit, seek back to its start so it becomes the start of the next line.
 String readWrappedLine() {
   String line;
 
@@ -271,7 +374,7 @@ String readWrappedLine() {
       word += (char)book.read();
     }
 
-    if (word.length() > CHARS_PER_LINE) {
+    if (word.length() > BOOK_CHARS_PER_LINE) {
       // Single word longer than a whole line (long URL, etc): hard-break it
       // rather than looping forever. Flush whatever we already have first so
       // the long word starts cleanly on its own line.
@@ -279,12 +382,12 @@ String readWrappedLine() {
         book.seek(wordStart);
         break;
       }
-      book.seek(wordStart + CHARS_PER_LINE);
-      return word.substring(0, CHARS_PER_LINE);
+      book.seek(wordStart + BOOK_CHARS_PER_LINE);
+      return word.substring(0, BOOK_CHARS_PER_LINE);
     }
 
     uint16_t candidateLen = line.length() + (line.length() > 0 ? 1 : 0) + word.length();
-    if (candidateLen > CHARS_PER_LINE) {
+    if (candidateLen > BOOK_CHARS_PER_LINE) {
       book.seek(wordStart);
       break;
     }
@@ -303,8 +406,8 @@ String readWrappedLine() {
 }
 
 void renderPageAt(uint32_t offset, bool rememberPrevious) {
-  if (!LittleFS.exists("/book.txt")) {
-    showMessage("Upload a TXT at\n192.168.4.1");
+  if (currentBookName.length() == 0 || !LittleFS.exists(bookPath(currentBookName))) {
+    showMessage("Upload a TXT at\n192.168.4.1\nor press Menu\nfor the Home screen");
     return;
   }
 
@@ -316,10 +419,10 @@ void renderPageAt(uint32_t offset, bool rememberPrevious) {
     return;
   }
 
-  String lines[MAX_LINES];
+  String lines[BOOK_MAX_LINES];
   uint8_t lineCount = 0;
 
-  while (book.available() && lineCount < MAX_LINES) {
+  while (book.available() && lineCount < BOOK_MAX_LINES) {
     lines[lineCount] = readWrappedLine();
     if (lines[lineCount].length() > 0 || book.available()) lineCount++;
   }
@@ -329,7 +432,7 @@ void renderPageAt(uint32_t offset, bool rememberPrevious) {
   beginFrame();
 
   for (uint8_t i = 0; i < lineCount; i++) {
-    EPD_ShowString(LEFT_MARGIN, TOP_MARGIN + (i * LINE_HEIGHT), lines[i].c_str(), BLACK, LINE_FONT);
+    EPD_ShowString(BOOK_LEFT_MARGIN, BOOK_TOP_MARGIN + (i * BOOK_LINE_HEIGHT), lines[i].c_str(), BLACK, BOOK_FONT);
   }
 
   endFrame();
@@ -348,6 +451,75 @@ void previousPage() {
   renderPageAt(popHistory(), false);
 }
 
+// ---------------- MENUS ----------------
+void renderHome() {
+  beginFrame();
+  for (uint8_t i = 0; i < HOME_ITEM_COUNT; i++) {
+    String label = (i == homeSelection) ? "> " : "  ";
+    label += HOME_ITEMS[i];
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + i * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+  }
+  endFrame();
+}
+
+void renderChooseBook() {
+  beginFrame();
+  if (bookCount == 0) {
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "No books yet.", BLACK, MENU_FONT);
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, "Upload one first.", BLACK, MENU_FONT);
+  } else {
+    for (uint8_t i = 0; i < bookCount; i++) {
+      String label = (i == chooseSelection) ? "> " : "  ";
+      String name = bookList[i];
+      if (name.length() > 26) name = name.substring(0, 23) + "...";
+      label += name;
+      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + i * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+    }
+  }
+  endFrame();
+}
+
+void renderWifiInfo() {
+  beginFrame();
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "Connect to Wi-Fi:", BLACK, MENU_FONT);
+  String ssidLine = "SSID: ";
+  ssidLine += AP_NAME;
+  String passLine = "Pass: ";
+  passLine += AP_PASS;
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, ssidLine.c_str(), BLACK, MENU_FONT);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, passLine.c_str(), BLACK, MENU_FONT);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 3 * MENU_LINE_HEIGHT, "Then open:", BLACK, MENU_FONT);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, "192.168.4.1", BLACK, MENU_FONT);
+  endFrame();
+}
+
+void enterHome() {
+  currentScreen = SCREEN_HOME;
+  homeSelection = 0;
+  renderHome();
+}
+
+void selectHomeItem() {
+  switch (homeSelection) {
+    case 0:  // Resume Last Book
+      if (currentBookName.length() > 0) {
+        currentScreen = SCREEN_READING;
+        renderPageAt(pageStart, false);
+      }
+      break;
+    case 1:  // Choose Book
+      listBooks();
+      chooseSelection = 0;
+      currentScreen = SCREEN_CHOOSE_BOOK;
+      renderChooseBook();
+      break;
+    case 2:  // Connect to Wi-Fi
+      currentScreen = SCREEN_WIFI_INFO;
+      renderWifiInfo();
+      break;
+  }
+}
+
 // ---------------- BUTTONS + SLEEP ----------------
 void handleButtons() {
   static bool lastMenu = false;
@@ -362,19 +534,55 @@ void handleButtons() {
   bool nowDialUp = pressed(DIAL_UP);
   bool nowDialPress = pressed(DIAL_PRESS);
 
-  if ((nowDialDown && !lastDialDown) || (nowDialPress && !lastDialPress)) {
-    touchActivity();
-    nextPage();
-  }
+  bool menuTapped = nowMenu && !lastMenu;
+  bool backTapped = nowBack && !lastBack;
+  bool dialDownTapped = nowDialDown && !lastDialDown;
+  bool dialUpTapped = nowDialUp && !lastDialUp;
+  bool dialPressTapped = nowDialPress && !lastDialPress;
 
-  if ((nowDialUp && !lastDialUp) || (nowBack && !lastBack)) {
-    touchActivity();
-    previousPage();
-  }
+  if (menuTapped || backTapped || dialDownTapped || dialUpTapped || dialPressTapped) touchActivity();
 
-  if (nowMenu && !lastMenu) {
-    touchActivity();
-    showMessage("PocketReader\nWiFi: PocketReader\n192.168.4.1");
+  switch (currentScreen) {
+    case SCREEN_READING:
+      if (dialDownTapped || dialPressTapped) nextPage();
+      if (dialUpTapped || backTapped) previousPage();
+      if (menuTapped) enterHome();
+      break;
+
+    case SCREEN_HOME:
+      if (dialDownTapped) {
+        homeSelection = (homeSelection + 1) % HOME_ITEM_COUNT;
+        renderHome();
+      }
+      if (dialUpTapped) {
+        homeSelection = (homeSelection + HOME_ITEM_COUNT - 1) % HOME_ITEM_COUNT;
+        renderHome();
+      }
+      if (backTapped || dialPressTapped) selectHomeItem();
+      if (menuTapped && currentBookName.length() > 0) {
+        currentScreen = SCREEN_READING;
+        renderPageAt(pageStart, false);
+      }
+      break;
+
+    case SCREEN_CHOOSE_BOOK:
+      if (bookCount > 0) {
+        if (dialDownTapped) {
+          chooseSelection = (chooseSelection + 1) % bookCount;
+          renderChooseBook();
+        }
+        if (dialUpTapped) {
+          chooseSelection = (chooseSelection + bookCount - 1) % bookCount;
+          renderChooseBook();
+        }
+        if (backTapped || dialPressTapped) openBook(bookList[chooseSelection]);
+      }
+      if (menuTapped) enterHome();
+      break;
+
+    case SCREEN_WIFI_INFO:
+      if (menuTapped || backTapped || dialPressTapped) enterHome();
+      break;
   }
 
   lastMenu = nowMenu;
@@ -421,12 +629,20 @@ void setup() {
     showMessage("LittleFS failed");
     while (true) delay(1000);
   }
+  if (!LittleFS.exists("/books")) LittleFS.mkdir("/books");
 
   setupAP();
   setupWebServer();
 
-  uint32_t saved = loadSavedPosition();
+  currentBookName = loadCurrentBookName();
+  if (currentBookName.length() == 0 || !LittleFS.exists(bookPath(currentBookName))) {
+    listBooks();
+    currentBookName = (bookCount > 0) ? bookList[0] : "";
+  }
+
+  uint32_t saved = currentBookName.length() > 0 ? loadSavedPosition(currentBookName) : 0;
   reopenBookAt(saved);
+  currentScreen = SCREEN_READING;
   renderPageAt(saved, false);
 }
 
