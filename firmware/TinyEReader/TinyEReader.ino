@@ -7,16 +7,17 @@
     Connect to Wi-Fi screen is showing -- off the rest of the time to save
     battery, including at boot
   - Multi-book library: each upload adds a book instead of replacing one.
-    Hold Back on a highlighted book in Choose Book to delete it
+    Choose Book has a Yes/No confirm dialog before deleting one
   - Remembers reading position per book, boots straight into the last book read
-  - True sequential "page up": always the page whose content immediately
-    precedes what's on screen, computed by replaying forward pagination
-    from the current chapter's start (cached so repeated/held presses don't
-    redo that work) -- not an undo-last-jump stack, which would land on
-    wherever you were before your last chapter skip instead
-  - Hold the dial while reading to auto-advance/reverse multiple pages
-    instead of tapping once per page
-  - Chapter skip (Top/Bottom while reading) using form-feed markers a book
+  - True sequential "page up"/"page down": always the page whose content
+    immediately precedes/follows what's on screen, computed by replaying
+    forward pagination from the current chapter's start (cached so
+    repeated/held presses don't redo that work) -- not an undo-last-jump
+    stack, which would land on wherever you were before your last chapter
+    skip instead
+  - Hold Top/Bottom while reading to auto-turn multiple pages instead of
+    tapping once per page
+  - Chapter skip (dial rotate while reading) using form-feed markers a book
     may contain -- see tools/epub_to_txt.py
   - Common "smart" typographic punctuation (curly quotes, em/en dashes,
     ellipses) is transliterated to plain ASCII on the fly, since the font
@@ -56,9 +57,15 @@
 
 // ---------------- HARDWARE CONFIG ----------------
 // Button/dial pins per Elecrow's own examples (2.13_key.ino) and product wiki.
-// While reading a book: top = previous chapter, bottom = next chapter,
-// dial rotate = page turn, dial press = Home. In menus: top/bottom/dial
-// press mean Back/Select as documented on each screen's handler below.
+//
+// While reading a book: top = previous page (hold to keep going), bottom =
+// next page (hold to keep going), dial up = previous chapter, dial down =
+// next chapter, dial press = Home.
+//
+// Everywhere else (Home, Choose Book, Connect to Wi-Fi, the delete confirm
+// dialog): top = move selection up, bottom = move selection down, dial
+// press = select, dial up = jump straight to Home from anywhere, dial down
+// on a highlighted book in Choose Book opens a Yes/No delete confirmation.
 #define BTN_MENU     2   // top button
 #define BTN_BACK     1   // bottom button
 #define DIAL_DOWN    4   // dial rotate down
@@ -81,8 +88,7 @@ constexpr size_t MAX_BOOK_SIZE = 3 * 1024 * 1024;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
 constexpr uint8_t MAX_BOOKS = 5;  // library list isn't scrollable yet -- keep it to what fits on screen
                                    // (one row of the Choose Book screen is a free-space header)
-constexpr unsigned long DELETE_HOLD_MS = 800;  // hold Back this long on Choose Book to delete
-constexpr unsigned long PAGE_REPEAT_DELAY_MS = 500;     // hold the dial this long to start auto-paging
+constexpr unsigned long PAGE_REPEAT_DELAY_MS = 500;     // hold Top/Bottom this long to start auto-paging
 constexpr unsigned long PAGE_REPEAT_INTERVAL_MS = 300;  // then advance one page this often while held
 
 // Book text layout (8x16 font). 6 lines is the max that fits at all: the
@@ -104,7 +110,7 @@ constexpr uint8_t MENU_FONT = 16;
 
 WebServer server(80);
 
-enum AppScreen : uint8_t { SCREEN_READING, SCREEN_HOME, SCREEN_CHOOSE_BOOK, SCREEN_WIFI_INFO };
+enum AppScreen : uint8_t { SCREEN_READING, SCREEN_HOME, SCREEN_CHOOSE_BOOK, SCREEN_WIFI_INFO, SCREEN_CONFIRM_DELETE };
 AppScreen currentScreen = SCREEN_READING;
 
 const char* HOME_ITEMS[] = { "Resume Last Book", "Choose Book", "Connect to Wi-Fi" };
@@ -114,6 +120,7 @@ uint8_t homeSelection = 0;
 String bookList[MAX_BOOKS];
 uint8_t bookCount = 0;
 uint8_t chooseSelection = 0;
+bool confirmDeleteYes = false;  // which option is highlighted in the delete dialog; defaults to No
 
 String currentBookName;  // filename only, e.g. "MyNovel.txt" -- lives under /books/
 
@@ -741,9 +748,9 @@ void renderHome() {
   endFrame();
 }
 
-// Row 0 is a free-space header; the book list starts one row down. Hold
-// Back for DELETE_HOLD_MS on a highlighted book to delete it (handled in
-// handleButtons()) -- a short tap opens it instead, same as before.
+// Row 0 is a free-space header; the book list starts one row down. Dial
+// press opens the highlighted book; dial down opens a Yes/No delete
+// confirmation for it instead (see renderConfirmDelete/enterConfirmDelete).
 void renderChooseBook() {
   beginFrame();
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, freeSpaceLabel().c_str(), BLACK, MENU_FONT);
@@ -761,6 +768,32 @@ void renderChooseBook() {
     }
   }
   endFrame();
+}
+
+// Top/Bottom and dial up/down all move the Yes/No highlight here (same
+// up/down convention as every other screen); dial press confirms whichever
+// is highlighted. Defaults to No so nothing destructive happens unless the
+// user deliberately moves to Yes and confirms.
+void renderConfirmDelete() {
+  beginFrame();
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "Delete this book?", BLACK, MENU_FONT);
+
+  String name = (chooseSelection < bookCount) ? bookList[chooseSelection] : "";
+  if (name.length() > 26) name = name.substring(0, 23) + "...";
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, name.c_str(), BLACK, MENU_FONT);
+
+  String yesLabel = confirmDeleteYes ? "> Yes" : "  Yes";
+  String noLabel = !confirmDeleteYes ? "> No" : "  No";
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 3 * MENU_LINE_HEIGHT, yesLabel.c_str(), BLACK, MENU_FONT);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, noLabel.c_str(), BLACK, MENU_FONT);
+
+  endFrame();
+}
+
+void enterConfirmDelete() {
+  confirmDeleteYes = false;
+  currentScreen = SCREEN_CONFIRM_DELETE;
+  renderConfirmDelete();
 }
 
 void renderWifiInfo() {
@@ -829,12 +862,10 @@ void handleButtons() {
   static bool lastDialDown = false;
   static bool lastDialUp = false;
   static bool lastDialPress = false;
+  static unsigned long menuHoldStart = 0;
+  static unsigned long menuLastRepeat = 0;
   static unsigned long backHoldStart = 0;
-  static bool backHoldHandled = false;
-  static unsigned long dialDownHoldStart = 0;
-  static unsigned long dialDownLastRepeat = 0;
-  static unsigned long dialUpHoldStart = 0;
-  static unsigned long dialUpLastRepeat = 0;
+  static unsigned long backLastRepeat = 0;
 
   bool nowMenu = pressed(BTN_MENU);
   bool nowBack = pressed(BTN_BACK);
@@ -843,98 +874,98 @@ void handleButtons() {
   bool nowDialPress = pressed(DIAL_PRESS);
 
   bool menuTapped = nowMenu && !lastMenu;
+  bool backTapped = nowBack && !lastBack;
   bool dialDownTapped = nowDialDown && !lastDialDown;
   bool dialUpTapped = nowDialUp && !lastDialUp;
   bool dialPressTapped = nowDialPress && !lastDialPress;
 
-  // Holding the dial past PAGE_REPEAT_DELAY_MS starts auto-advancing pages
-  // every PAGE_REPEAT_INTERVAL_MS until released, so you can hold to skip
-  // several pages instead of tapping once per page.
-  if (dialDownTapped) {
-    dialDownHoldStart = millis();
-    dialDownLastRepeat = millis();
+  // Holding Top or Bottom past PAGE_REPEAT_DELAY_MS starts auto-turning
+  // pages every PAGE_REPEAT_INTERVAL_MS until released, so you can hold to
+  // skip several pages instead of tapping once per page. Only meaningful
+  // in SCREEN_READING (see below), but harmless to track unconditionally.
+  if (menuTapped) {
+    menuHoldStart = millis();
+    menuLastRepeat = millis();
   }
-  bool dialDownRepeat = nowDialDown && !dialDownTapped &&
-                         millis() - dialDownHoldStart >= PAGE_REPEAT_DELAY_MS &&
-                         millis() - dialDownLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
-  if (dialDownRepeat) dialDownLastRepeat = millis();
+  bool menuRepeat = nowMenu && !menuTapped &&
+                     millis() - menuHoldStart >= PAGE_REPEAT_DELAY_MS &&
+                     millis() - menuLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
+  if (menuRepeat) menuLastRepeat = millis();
 
-  if (dialUpTapped) {
-    dialUpHoldStart = millis();
-    dialUpLastRepeat = millis();
-  }
-  bool dialUpRepeat = nowDialUp && !dialUpTapped &&
-                       millis() - dialUpHoldStart >= PAGE_REPEAT_DELAY_MS &&
-                       millis() - dialUpLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
-  if (dialUpRepeat) dialUpLastRepeat = millis();
-
-  // Back gets hold-tracking instead of a plain edge trigger, so Choose Book
-  // can tell a normal tap (open the book) from a deliberate hold (delete
-  // it). backTapped only fires if Back is released before the hold
-  // threshold; backLongPress fires once, the moment the threshold is
-  // crossed, while Back is still held down.
-  bool backTapped = false;
-  bool backLongPress = false;
-  if (nowBack && !lastBack) {
+  if (backTapped) {
     backHoldStart = millis();
-    backHoldHandled = false;
-  } else if (nowBack && lastBack && !backHoldHandled && millis() - backHoldStart >= DELETE_HOLD_MS) {
-    backLongPress = true;
-    backHoldHandled = true;
-  } else if (!nowBack && lastBack && !backHoldHandled) {
-    backTapped = true;
+    backLastRepeat = millis();
   }
+  bool backRepeat = nowBack && !backTapped &&
+                     millis() - backHoldStart >= PAGE_REPEAT_DELAY_MS &&
+                     millis() - backLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
+  if (backRepeat) backLastRepeat = millis();
 
-  if (menuTapped || backTapped || backLongPress || dialDownTapped || dialUpTapped ||
-      dialPressTapped || dialDownRepeat || dialUpRepeat) {
+  if (menuTapped || backTapped || dialDownTapped || dialUpTapped || dialPressTapped ||
+      menuRepeat || backRepeat) {
     touchActivity();
   }
 
   switch (currentScreen) {
     case SCREEN_READING:
-      if (dialDownTapped || dialDownRepeat) nextPage();
-      if (dialUpTapped || dialUpRepeat) previousPage();
+      if (menuTapped || menuRepeat) previousPage();
+      if (backTapped || backRepeat) nextPage();
+      if (dialUpTapped) previousChapter();
+      if (dialDownTapped) nextChapter();
       if (dialPressTapped) enterHome();
-      if (menuTapped) previousChapter();
-      if (backTapped) nextChapter();
       break;
 
     case SCREEN_HOME:
-      if (dialDownTapped) {
-        homeSelection = (homeSelection + 1) % HOME_ITEM_COUNT;
-        renderHome();
-      }
-      if (dialUpTapped) {
+      if (menuTapped) {
         homeSelection = (homeSelection + HOME_ITEM_COUNT - 1) % HOME_ITEM_COUNT;
         renderHome();
       }
-      if (backTapped || dialPressTapped) selectHomeItem();
-      if (menuTapped && currentBookName.length() > 0) {
-        currentScreen = SCREEN_READING;
-        renderPageAt(pageStart);
+      if (backTapped) {
+        homeSelection = (homeSelection + 1) % HOME_ITEM_COUNT;
+        renderHome();
       }
+      if (dialPressTapped) selectHomeItem();
       break;
 
     case SCREEN_CHOOSE_BOOK:
       if (bookCount > 0) {
-        if (dialDownTapped) {
-          chooseSelection = (chooseSelection + 1) % bookCount;
-          renderChooseBook();
-        }
-        if (dialUpTapped) {
+        if (menuTapped) {
           chooseSelection = (chooseSelection + bookCount - 1) % bookCount;
           renderChooseBook();
         }
-        if (backTapped || dialPressTapped) openBook(bookList[chooseSelection]);
-        if (backLongPress) deleteSelectedBook();
+        if (backTapped) {
+          chooseSelection = (chooseSelection + 1) % bookCount;
+          renderChooseBook();
+        }
+        if (dialPressTapped) openBook(bookList[chooseSelection]);
+        if (dialDownTapped) enterConfirmDelete();
       }
-      if (menuTapped) enterHome();
+      if (dialUpTapped) enterHome();
       break;
 
     case SCREEN_WIFI_INFO:
-      if (menuTapped || backTapped || dialPressTapped) {
+      if (dialPressTapped || dialUpTapped) {
         exitWifiInfo();
         enterHome();
+      }
+      break;
+
+    case SCREEN_CONFIRM_DELETE:
+      if (menuTapped || dialUpTapped) {
+        confirmDeleteYes = true;
+        renderConfirmDelete();
+      }
+      if (backTapped || dialDownTapped) {
+        confirmDeleteYes = false;
+        renderConfirmDelete();
+      }
+      if (dialPressTapped) {
+        currentScreen = SCREEN_CHOOSE_BOOK;
+        if (confirmDeleteYes) {
+          deleteSelectedBook();  // re-renders Choose Book itself
+        } else {
+          renderChooseBook();
+        }
       }
       break;
   }
