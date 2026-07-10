@@ -63,9 +63,10 @@
 // next chapter, dial press = Home.
 //
 // Everywhere else (Home, Choose Book, Connect to Wi-Fi, the delete confirm
-// dialog): top = move selection up, bottom = move selection down, dial
-// press = select, dial up = jump straight to Home from anywhere, dial down
-// on a highlighted book in Choose Book opens a Yes/No delete confirmation.
+// dialog): dial up/down = move selection, dial press = select, top = jump
+// straight to Home from anywhere (cancels the delete dialog without
+// deleting), bottom on a highlighted book in Choose Book opens a Yes/No
+// delete confirmation.
 #define BTN_MENU     2   // top button
 #define BTN_BACK     1   // bottom button
 #define DIAL_DOWN    4   // dial rotate down
@@ -916,11 +917,11 @@ void handleButtons() {
       break;
 
     case SCREEN_HOME:
-      if (menuTapped) {
+      if (dialUpTapped) {
         homeSelection = (homeSelection + HOME_ITEM_COUNT - 1) % HOME_ITEM_COUNT;
         renderHome();
       }
-      if (backTapped) {
+      if (dialDownTapped) {
         homeSelection = (homeSelection + 1) % HOME_ITEM_COUNT;
         renderHome();
       }
@@ -929,33 +930,33 @@ void handleButtons() {
 
     case SCREEN_CHOOSE_BOOK:
       if (bookCount > 0) {
-        if (menuTapped) {
+        if (dialUpTapped) {
           chooseSelection = (chooseSelection + bookCount - 1) % bookCount;
           renderChooseBook();
         }
-        if (backTapped) {
+        if (dialDownTapped) {
           chooseSelection = (chooseSelection + 1) % bookCount;
           renderChooseBook();
         }
         if (dialPressTapped) openBook(bookList[chooseSelection]);
-        if (dialDownTapped) enterConfirmDelete();
+        if (backTapped) enterConfirmDelete();
       }
-      if (dialUpTapped) enterHome();
+      if (menuTapped) enterHome();
       break;
 
     case SCREEN_WIFI_INFO:
-      if (dialPressTapped || dialUpTapped) {
+      if (dialPressTapped || menuTapped) {
         exitWifiInfo();
         enterHome();
       }
       break;
 
     case SCREEN_CONFIRM_DELETE:
-      if (menuTapped || dialUpTapped) {
+      if (dialUpTapped) {
         confirmDeleteYes = true;
         renderConfirmDelete();
       }
-      if (backTapped || dialDownTapped) {
+      if (dialDownTapped) {
         confirmDeleteYes = false;
         renderConfirmDelete();
       }
@@ -967,6 +968,7 @@ void handleButtons() {
           renderChooseBook();
         }
       }
+      if (menuTapped) enterHome();  // cancels without deleting
       break;
   }
 

@@ -40,8 +40,8 @@ Button meaning depends on which screen is showing:
 | | Top | Bottom | Dial rotate | Dial press |
 | --- | --- | --- | --- | --- |
 | Reading a book | Previous page (hold to repeat) | Next page (hold to repeat) | Up = previous chapter, down = next chapter | Open Home menu |
-| Home / Choose Book / delete dialog | Move selection up | Move selection down | Up = jump to Home; down on a book in Choose Book opens the delete dialog | Select highlighted item |
-| Connect to Wi-Fi | — | — | Up = back to Home | Back to Home |
+| Home / Choose Book / delete dialog | Jump to Home (cancels the delete dialog without deleting) | On a book in Choose Book, opens the delete dialog | Move selection up/down | Select highlighted item |
+| Connect to Wi-Fi | Back to Home | — | — | Back to Home |
 
 ## Display driver
 
@@ -122,8 +122,8 @@ Then open `http://localhost:8787` in Chrome or Edge (Web Serial requires a Chrom
 ## Using it
 
 1. Flash the firmware.
-2. On the device, press the dial to open the Home menu, move to **Connect to Wi-Fi** with Top/Bottom, and press the dial to select it.
+2. On the device, press the dial to open the Home menu, move to **Connect to Wi-Fi** with the dial, and press the dial to select it.
 3. Scan the Wi-Fi QR code with your phone (or connect manually to `PocketReader`, password `12345678`).
 4. Open `http://192.168.4.1` and upload a `.txt` file (or a converted EPUB — see [Chapters](#chapters-and-the-epub-converter)). It becomes the active book immediately.
-5. Press the dial (or turn the dial up) to back out of the Wi-Fi screen when done — Wi-Fi turns off automatically.
+5. Press the dial (or tap Top) to back out of the Wi-Fi screen when done — Wi-Fi turns off automatically.
 6. Use Top/Bottom to turn pages (hold to keep going), the dial to skip chapters, dial press for the Home menu.
