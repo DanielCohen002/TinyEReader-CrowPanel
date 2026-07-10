@@ -737,11 +737,11 @@ const char* HOME_SHORT_LABELS[] = { "Read", "Books", "Wi-Fi" };
 // Icon-first layout: a row of three 32x32 icons with a small label under
 // each, centered as a block in the 250x122 screen, selection shown as a
 // border box rather than a "> " prefix (there's no list to prefix here).
-constexpr uint16_t HOME_ICON_SIZE = 32;
-constexpr uint16_t HOME_ICON_Y = 38;
+constexpr uint16_t HOME_ICON_SIZE = 48;
+constexpr uint16_t HOME_ICON_Y = 30;
 constexpr uint8_t HOME_LABEL_FONT = 12;  // 6x12 -- deliberately small/secondary to the icon
 constexpr uint16_t HOME_LABEL_Y = HOME_ICON_Y + HOME_ICON_SIZE + 4;
-const uint16_t HOME_ICON_X[HOME_ITEM_COUNT] = { 20, 109, 198 };  // evenly spaced, symmetric margins
+const uint16_t HOME_ICON_X[HOME_ITEM_COUNT] = { 26, 100, 174 };  // evenly spaced, symmetric margins
 
 void renderHome() {
   beginFrame();
