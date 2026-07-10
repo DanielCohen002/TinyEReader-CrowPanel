@@ -10,8 +10,14 @@
     Hold Back on a highlighted book in Choose Book to delete it
   - Remembers reading position per book, boots straight into the last book read
   - Real page-start history so Back goes to the actual previous page
+  - Hold the dial while reading to auto-advance/reverse multiple pages
+    instead of tapping once per page
   - Chapter skip (Top/Bottom while reading) using form-feed markers a book
     may contain -- see tools/epub_to_txt.py
+  - Common "smart" typographic punctuation (curly quotes, em/en dashes,
+    ellipses) is transliterated to plain ASCII on the fly, since the font
+    only has ASCII glyphs and would otherwise silently drop the rest of
+    whatever line it appeared on
   - Home menu (Resume Last Book / Choose Book / Connect to Wi-Fi), each
     screen showing free space remaining out of the ~6.3MB library partition
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
@@ -61,6 +67,8 @@ constexpr uint32_t SLEEP_AFTER_MS = 60000;
 constexpr uint8_t MAX_BOOKS = 5;  // library list isn't scrollable yet -- keep it to what fits on screen
                                    // (one row of the Choose Book screen is a free-space header)
 constexpr unsigned long DELETE_HOLD_MS = 800;  // hold Back this long on Choose Book to delete
+constexpr unsigned long PAGE_REPEAT_DELAY_MS = 500;     // hold the dial this long to start auto-paging
+constexpr unsigned long PAGE_REPEAT_INTERVAL_MS = 300;  // then advance one page this often while held
 
 // Book text layout (8x16 font). 6 lines is the max that fits at all: the
 // 12x24 font this used to be set to is exactly 24px tall, and 6 * 24 = 144
@@ -461,6 +469,52 @@ void setupWebServer() {
 }
 
 // ---------------- READER ----------------
+// The font only has glyphs for printable ASCII, and EPD_ShowString stops
+// rendering a line dead at the first byte outside that range (see EPD.cpp:
+// `(*s <= '~') && (*s >= ' ')` -- char is signed here, so bytes >= 0x80 read
+// as negative and fail that check immediately). Real book text is full of
+// multi-byte UTF-8 "smart" punctuation once entities are decoded -- curly
+// quotes, em/en dashes, ellipses -- which without this would silently kill
+// the rest of whatever line they're on, showing as missing words followed
+// by a blank gap to the end of that line. This decodes the lead byte's
+// UTF-8 sequence length, consumes the continuation bytes, and maps the
+// handful of typographic characters that show up constantly in real prose
+// to plain ASCII lookalikes. Anything without a mapping is dropped rather
+// than left to corrupt rendering -- there's no glyph for it regardless.
+String utf8ToAsciiReplacement(uint8_t leadByte) {
+  uint8_t extraBytes;
+  uint32_t codepoint;
+  if ((leadByte & 0xE0) == 0xC0) {
+    extraBytes = 1;
+    codepoint = leadByte & 0x1F;
+  } else if ((leadByte & 0xF0) == 0xE0) {
+    extraBytes = 2;
+    codepoint = leadByte & 0x0F;
+  } else if ((leadByte & 0xF8) == 0xF0) {
+    extraBytes = 3;
+    codepoint = leadByte & 0x07;
+  } else {
+    return "";  // not a valid UTF-8 lead byte (or a stray continuation byte)
+  }
+
+  for (uint8_t i = 0; i < extraBytes && book.available(); i++) {
+    uint8_t cont = (uint8_t)book.peek();
+    if ((cont & 0xC0) != 0x80) break;  // malformed sequence, bail out early
+    book.read();
+    codepoint = (codepoint << 6) | (cont & 0x3F);
+  }
+
+  switch (codepoint) {
+    case 0x2018: case 0x2019: return "'";    // curly single quotes / apostrophe
+    case 0x201C: case 0x201D: return "\"";   // curly double quotes
+    case 0x2013: return "-";                 // en dash
+    case 0x2014: return "--";                // em dash
+    case 0x2026: return "...";               // ellipsis
+    case 0x00A0: return " ";                 // non-breaking space
+    default: return "";
+  }
+}
+
 // Greedy word-wrap: build the line word by word and stop before a word that
 // would overflow BOOK_CHARS_PER_LINE, instead of cutting mid-word. If a word
 // won't fit, seek back to its start so it becomes the start of the next line.
@@ -483,9 +537,17 @@ String readWrappedLine() {
     uint32_t wordStart = book.position();
     String word;
     while (book.available()) {
-      char c = book.peek();
+      uint8_t c = (uint8_t)book.peek();
       if (c == ' ' || c == '\n' || c == '\r' || c == '\f') break;
-      word += (char)book.read();
+      book.read();
+
+      if (c >= ' ' && c <= '~') {
+        word += (char)c;
+      } else if (c >= 0x80) {
+        word += utf8ToAsciiReplacement(c);
+      }
+      // Anything else (a stray control byte below 0x20 that isn't one of
+      // our delimiters) is dropped silently.
     }
 
     if (word.length() > BOOK_CHARS_PER_LINE) {
@@ -664,6 +726,10 @@ void handleButtons() {
   static bool lastDialPress = false;
   static unsigned long backHoldStart = 0;
   static bool backHoldHandled = false;
+  static unsigned long dialDownHoldStart = 0;
+  static unsigned long dialDownLastRepeat = 0;
+  static unsigned long dialUpHoldStart = 0;
+  static unsigned long dialUpLastRepeat = 0;
 
   bool nowMenu = pressed(BTN_MENU);
   bool nowBack = pressed(BTN_BACK);
@@ -675,6 +741,27 @@ void handleButtons() {
   bool dialDownTapped = nowDialDown && !lastDialDown;
   bool dialUpTapped = nowDialUp && !lastDialUp;
   bool dialPressTapped = nowDialPress && !lastDialPress;
+
+  // Holding the dial past PAGE_REPEAT_DELAY_MS starts auto-advancing pages
+  // every PAGE_REPEAT_INTERVAL_MS until released, so you can hold to skip
+  // several pages instead of tapping once per page.
+  if (dialDownTapped) {
+    dialDownHoldStart = millis();
+    dialDownLastRepeat = millis();
+  }
+  bool dialDownRepeat = nowDialDown && !dialDownTapped &&
+                         millis() - dialDownHoldStart >= PAGE_REPEAT_DELAY_MS &&
+                         millis() - dialDownLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
+  if (dialDownRepeat) dialDownLastRepeat = millis();
+
+  if (dialUpTapped) {
+    dialUpHoldStart = millis();
+    dialUpLastRepeat = millis();
+  }
+  bool dialUpRepeat = nowDialUp && !dialUpTapped &&
+                       millis() - dialUpHoldStart >= PAGE_REPEAT_DELAY_MS &&
+                       millis() - dialUpLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
+  if (dialUpRepeat) dialUpLastRepeat = millis();
 
   // Back gets hold-tracking instead of a plain edge trigger, so Choose Book
   // can tell a normal tap (open the book) from a deliberate hold (delete
@@ -693,14 +780,15 @@ void handleButtons() {
     backTapped = true;
   }
 
-  if (menuTapped || backTapped || backLongPress || dialDownTapped || dialUpTapped || dialPressTapped) {
+  if (menuTapped || backTapped || backLongPress || dialDownTapped || dialUpTapped ||
+      dialPressTapped || dialDownRepeat || dialUpRepeat) {
     touchActivity();
   }
 
   switch (currentScreen) {
     case SCREEN_READING:
-      if (dialDownTapped) nextPage();
-      if (dialUpTapped) previousPage();
+      if (dialDownTapped || dialDownRepeat) nextPage();
+      if (dialUpTapped || dialUpRepeat) previousPage();
       if (dialPressTapped) enterHome();
       if (menuTapped) previousChapter();
       if (backTapped) nextChapter();
