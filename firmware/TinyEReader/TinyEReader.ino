@@ -9,7 +9,11 @@
   - Multi-book library: each upload adds a book instead of replacing one.
     Hold Back on a highlighted book in Choose Book to delete it
   - Remembers reading position per book, boots straight into the last book read
-  - Real page-start history so Back goes to the actual previous page
+  - True sequential "page up": always the page whose content immediately
+    precedes what's on screen, computed by replaying forward pagination
+    from the current chapter's start (cached so repeated/held presses don't
+    redo that work) -- not an undo-last-jump stack, which would land on
+    wherever you were before your last chapter skip instead
   - Hold the dial while reading to auto-advance/reverse multiple pages
     instead of tapping once per page
   - Chapter skip (Top/Bottom while reading) using form-feed markers a book
@@ -18,6 +22,10 @@
     ellipses) is transliterated to plain ASCII on the fly, since the font
     only has ASCII glyphs and would otherwise silently drop the rest of
     whatever line it appeared on
+  - A single newline in the source text is treated as a word separator, not
+    a forced line break, so hard-wrapped plain .txt ebooks (Project
+    Gutenberg-style, one fixed-width source line per line) reflow to this
+    screen's width instead of leaving a gap at every source line boundary
   - Home menu (Resume Last Book / Choose Book / Connect to Wi-Fi), each
     screen showing free space remaining out of the ~6.3MB library partition
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
@@ -62,7 +70,6 @@ const char* AP_PASS = "12345678";
 // stops one absurdly large file from being accepted. See partitions.csv:
 // the LittleFS partition is sized at ~6.3MB of the board's 8MB flash.
 constexpr size_t MAX_BOOK_SIZE = 3 * 1024 * 1024;
-constexpr uint16_t PAGE_HISTORY_LIMIT = 128;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
 constexpr uint8_t MAX_BOOKS = 5;  // library list isn't scrollable yet -- keep it to what fits on screen
                                    // (one row of the Choose Book screen is a free-space header)
@@ -106,8 +113,6 @@ File book;
 size_t fileSize = 0;
 uint32_t pageStart = 0;
 uint32_t pageEnd = 0;
-uint32_t pageHistory[PAGE_HISTORY_LIMIT];
-uint16_t historyCount = 0;
 unsigned long lastActivity = 0;
 
 // Chapter boundaries are marked in the uploaded .txt with a form-feed byte
@@ -117,6 +122,15 @@ unsigned long lastActivity = 0;
 constexpr uint16_t MAX_CHAPTERS = 200;
 uint32_t chapterOffsets[MAX_CHAPTERS];
 uint16_t chapterCount = 0;
+
+// Page boundaries depend on word-wrapping, so there's no way to compute
+// "the page before this byte offset" directly -- see findPreviousPageStart.
+// This caches the most recent forward replay so repeated/held "page up"
+// presses don't redo it from scratch each time.
+constexpr uint16_t MAX_CACHED_PAGES = 300;
+uint32_t cachedPageStarts[MAX_CACHED_PAGES];
+uint16_t cachedPageCount = 0;
+uint32_t cachedChapterStart = 0xFFFFFFFF;
 
 const char uploadPage[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -302,23 +316,7 @@ void deleteSelectedBook() {
   renderChooseBook();
 }
 
-void pushHistory(uint32_t offset) {
-  if (historyCount > 0 && pageHistory[historyCount - 1] == offset) return;
-
-  if (historyCount == PAGE_HISTORY_LIMIT) {
-    memmove(pageHistory, pageHistory + 1, sizeof(pageHistory[0]) * (PAGE_HISTORY_LIMIT - 1));
-    historyCount--;
-  }
-
-  pageHistory[historyCount++] = offset;
-}
-
-uint32_t popHistory() {
-  if (historyCount == 0) return 0;
-  return pageHistory[--historyCount];
-}
-
-void renderPageAt(uint32_t offset, bool rememberPrevious);
+void renderPageAt(uint32_t offset);
 
 // Scans the whole book once for form-feed chapter markers and records their
 // byte offsets. Called once per book-open, not per page -- a full linear
@@ -340,13 +338,13 @@ void indexChapters() {
   }
   // No need to restore the read position here -- every caller of
   // indexChapters() immediately follows it with renderPageAt(), which
-  // reopens and re-seeks the book itself.
+  // re-seeks the book itself.
 }
 
 void nextChapter() {
   for (uint16_t i = 0; i < chapterCount; i++) {
     if (chapterOffsets[i] > pageStart) {
-      renderPageAt(chapterOffsets[i], true);
+      renderPageAt(chapterOffsets[i]);
       return;
     }
   }
@@ -355,22 +353,21 @@ void nextChapter() {
 void previousChapter() {
   for (int16_t i = (int16_t)chapterCount - 1; i >= 0; i--) {
     if (chapterOffsets[i] < pageStart) {
-      renderPageAt(chapterOffsets[i], true);
+      renderPageAt(chapterOffsets[i]);
       return;
     }
   }
-  if (chapterCount > 0) renderPageAt(chapterOffsets[0], true);
+  if (chapterCount > 0) renderPageAt(chapterOffsets[0]);
 }
 
 void openBook(const String& name) {
   currentBookName = name;
   saveCurrentBookName();
-  historyCount = 0;
   uint32_t saved = loadSavedPosition(name);
   reopenBookAt(saved);
   indexChapters();
   currentScreen = SCREEN_READING;
-  renderPageAt(saved, false);
+  renderPageAt(saved);
 }
 
 // ---------------- WIFI + WEB ----------------
@@ -518,20 +515,44 @@ String utf8ToAsciiReplacement(uint8_t leadByte) {
 // Greedy word-wrap: build the line word by word and stop before a word that
 // would overflow BOOK_CHARS_PER_LINE, instead of cutting mid-word. If a word
 // won't fit, seek back to its start so it becomes the start of the next line.
-// '\f' (form feed) is a chapter marker inserted by tools/epub_to_txt.py --
-// it's treated like a hard line break here but never printed, since
-// EPD_ShowString would otherwise just silently stop rendering at it (it's
-// below the printable ASCII range the font covers).
+//
+// Newline handling: a lone '\n' is treated as just another word separator,
+// not a forced line break. Plenty of real-world plain .txt ebooks (Project
+// Gutenberg-style) hard-wrap every source line at a fixed width like 70-80
+// characters with a single '\n' between them, unrelated to paragraph
+// structure -- treating every '\n' as a real break ends a rendered line at
+// each of those arbitrary source boundaries, leaving the rest of this
+// screen's much narrower line blank. Two or more consecutive newlines (a
+// blank line in the source, which is how tools/epub_to_txt.py separates
+// paragraphs) are what actually mark a paragraph break: the whole blank-line
+// run is consumed and the current line ends there, without inserting an
+// extra fully-blank rendered line for it (wastes a line out of the 6-line
+// page budget on a screen this small for no visible benefit).
+//
+// '\r' is ignored wherever it appears -- just part of a \r\n pair or a
+// stray leftover either way. '\f' is a chapter marker inserted by
+// tools/epub_to_txt.py and is always a hard break, same as before.
 String readWrappedLine() {
   String line;
 
   while (true) {
-    while (book.available() && book.peek() == ' ') book.read();
+    while (book.available() && (book.peek() == ' ' || book.peek() == '\r')) book.read();
 
     if (!book.available()) break;
-    if (book.peek() == '\n' || book.peek() == '\f') {
+
+    if (book.peek() == '\f') {
       book.read();
       break;
+    }
+
+    if (book.peek() == '\n') {
+      book.read();
+      while (book.available() && book.peek() == '\r') book.read();
+      if (book.available() && book.peek() == '\n') {
+        while (book.available() && (book.peek() == '\n' || book.peek() == '\r')) book.read();
+        break;
+      }
+      continue;  // lone newline: treat like a space, keep filling this line
     }
 
     uint32_t wordStart = book.position();
@@ -570,24 +591,87 @@ String readWrappedLine() {
 
     if (line.length() > 0) line += ' ';
     line += word;
-
-    if (book.available() && book.peek() == '\r') book.read();
-    if (book.available() && (book.peek() == '\n' || book.peek() == '\f')) {
-      book.read();
-      break;
-    }
   }
 
   return line;
 }
 
-void renderPageAt(uint32_t offset, bool rememberPrevious) {
+// Wraps text starting at `offset` (assumes `book` is already open on the
+// current book) into up to BOOK_MAX_LINES lines and returns where the
+// resulting page ends. Shared by the real render path and by
+// findPreviousPageStart()'s forward-replay simulation below -- both need to
+// agree exactly on where pages break, or "page up" could land somewhere
+// that doesn't match what was actually shown.
+uint32_t computePageEnd(uint32_t offset, String* outLines, uint8_t* outLineCount) {
+  if (!book) return offset;
+  if (offset > fileSize) offset = 0;
+  book.seek(offset);
+
+  uint8_t lineCount = 0;
+  while (book.available() && lineCount < BOOK_MAX_LINES) {
+    String line = readWrappedLine();
+    if (outLines) outLines[lineCount] = line;
+    if (line.length() > 0 || book.available()) lineCount++;
+  }
+
+  if (outLineCount) *outLineCount = lineCount;
+  return book.position();
+}
+
+// Finds the byte offset where the page immediately before `currentStart`
+// begins. Page breaks depend on word-wrapping, so there's no way to compute
+// "one page back" from a byte offset alone -- this replays forward
+// pagination from the start of the chapter containing currentStart (or the
+// previous chapter, if currentStart is itself a chapter's first page) up to
+// currentStart, and returns the start of the last simulated page before it.
+// The replay is cached (see cachedPageStarts) so repeated or held "page up"
+// presses within the same chapter don't redo it from scratch every time.
+uint32_t findPreviousPageStart(uint32_t currentStart) {
+  if (currentStart == 0) return 0;
+
+  int16_t chapterIndex = 0;
+  for (uint16_t i = 0; i < chapterCount; i++) {
+    if (chapterOffsets[i] <= currentStart) chapterIndex = i;
+    else break;
+  }
+
+  uint32_t replayFrom = chapterOffsets[chapterIndex];
+  uint32_t replayTo = currentStart;
+  if (replayFrom == currentStart) {
+    if (chapterIndex == 0) return 0;  // already at the first page of the first chapter
+    replayFrom = chapterOffsets[chapterIndex - 1];
+    replayTo = chapterOffsets[chapterIndex];
+  }
+
+  bool cacheCoversTarget = cachedChapterStart == replayFrom && cachedPageCount > 0 &&
+                            cachedPageStarts[cachedPageCount - 1] >= replayTo;
+  if (!cacheCoversTarget) {
+    cachedChapterStart = replayFrom;
+    cachedPageCount = 0;
+    cachedPageStarts[cachedPageCount++] = replayFrom;
+
+    uint32_t simulated = replayFrom;
+    while (simulated < replayTo && cachedPageCount < MAX_CACHED_PAGES) {
+      uint32_t nextSimulated = computePageEnd(simulated, nullptr, nullptr);
+      if (nextSimulated <= simulated) break;  // malformed input safety net
+      simulated = nextSimulated;
+      cachedPageStarts[cachedPageCount++] = simulated;
+    }
+  }
+
+  uint32_t previousStart = replayFrom;
+  for (uint16_t i = 0; i < cachedPageCount; i++) {
+    if (cachedPageStarts[i] >= replayTo) break;
+    previousStart = cachedPageStarts[i];
+  }
+  return previousStart;
+}
+
+void renderPageAt(uint32_t offset) {
   if (currentBookName.length() == 0 || !LittleFS.exists(bookPath(currentBookName))) {
     showMessage("Upload a TXT at\n192.168.4.1\nor press Menu\nfor the Home screen");
     return;
   }
-
-  if (rememberPrevious && pageStart != offset) pushHistory(pageStart);
 
   reopenBookAt(offset);
   if (!book) {
@@ -597,13 +681,7 @@ void renderPageAt(uint32_t offset, bool rememberPrevious) {
 
   String lines[BOOK_MAX_LINES];
   uint8_t lineCount = 0;
-
-  while (book.available() && lineCount < BOOK_MAX_LINES) {
-    lines[lineCount] = readWrappedLine();
-    if (lines[lineCount].length() > 0 || book.available()) lineCount++;
-  }
-
-  pageEnd = book.position();
+  pageEnd = computePageEnd(offset, lines, &lineCount);
 
   beginFrame();
 
@@ -619,12 +697,12 @@ void renderPageAt(uint32_t offset, bool rememberPrevious) {
 
 void nextPage() {
   if (!book || pageEnd >= fileSize) return;
-  renderPageAt(pageEnd, true);
+  renderPageAt(pageEnd);
 }
 
 void previousPage() {
-  if (historyCount == 0) return;
-  renderPageAt(popHistory(), false);
+  if (!book || pageStart == 0) return;
+  renderPageAt(findPreviousPageStart(pageStart));
 }
 
 // ---------------- MENUS ----------------
@@ -702,7 +780,7 @@ void selectHomeItem() {
     case 0:  // Resume Last Book
       if (currentBookName.length() > 0) {
         currentScreen = SCREEN_READING;
-        renderPageAt(pageStart, false);
+        renderPageAt(pageStart);
       }
       break;
     case 1:  // Choose Book
@@ -806,7 +884,7 @@ void handleButtons() {
       if (backTapped || dialPressTapped) selectHomeItem();
       if (menuTapped && currentBookName.length() > 0) {
         currentScreen = SCREEN_READING;
-        renderPageAt(pageStart, false);
+        renderPageAt(pageStart);
       }
       break;
 
@@ -902,7 +980,7 @@ void setup() {
   reopenBookAt(saved);
   indexChapters();
   currentScreen = SCREEN_READING;
-  renderPageAt(saved, false);
+  renderPageAt(saved);
 }
 
 void loop() {
