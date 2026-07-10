@@ -181,10 +181,11 @@ void handleRoot() {
   server.send(200, "text/html", uploadPage);
 }
 
+bool tooLarge = false;
+
 void handleUpload() {
   HTTPUpload& upload = server.upload();
   static File incoming;
-  static bool tooLarge = false;
 
   if (upload.status == UPLOAD_FILE_START) {
     tooLarge = false;
@@ -205,17 +206,32 @@ void handleUpload() {
 
   if (upload.status == UPLOAD_FILE_END) {
     if (incoming) incoming.close();
-    historyCount = 0;
-    pageStart = 0;
-    pageEnd = 0;
-    reopenBookAt(0);
-    server.send(tooLarge ? 413 : 200, "text/plain", tooLarge ? "File too large" : "Upload complete");
   }
+}
+
+// The WebServer library only finalizes the HTTP response once this request
+// handler runs (after handleUpload has fully drained the multipart body).
+// Calling server.send() from inside handleUpload instead sends the response
+// mid-parse, which makes the library emit a second, conflicting set of
+// headers (ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_LENGTH in Chrome).
+void handleUploadComplete() {
+  if (tooLarge) {
+    server.send(413, "text/plain", "File too large");
+    return;
+  }
+
+  historyCount = 0;
+  pageStart = 0;
+  pageEnd = 0;
+  reopenBookAt(0);
+  renderPageAt(0, false);
+
+  server.send(200, "text/plain", "Upload complete");
 }
 
 void setupWebServer() {
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/upload", HTTP_POST, []() {}, handleUpload);
+  server.on("/upload", HTTP_POST, handleUploadComplete, handleUpload);
   server.begin();
 }
 
