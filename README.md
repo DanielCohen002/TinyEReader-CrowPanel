@@ -8,10 +8,11 @@ Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between ch
 
 - Multi-book library: each upload adds a book rather than replacing one, up to 3MB per book
 - Remembers your reading position per book, boots straight back into whichever book you read last
-- Real page-turn history (Back goes to the actual previous page, not just backward by N bytes)
+- True sequential page-up/page-down (always the actual neighboring page, computed by replaying pagination rather than an undo-last-jump stack) — see [Display driver](#display-driver)
 - Chapter skip, using a marker character a book can contain — see [Chapters](#chapters-and-the-epub-converter) below
-- Home menu: Resume Last Book / Choose Book / Connect to Wi-Fi, each screen showing free space left in the library
-- Delete a book from Choose Book by holding Back on it for about a second
+- Home menu: Resume Last Book / Choose Book / Connect to Wi-Fi, each with its own icon, each screen showing free space left in the library
+- Delete a book from Choose Book via a Yes/No confirmation dialog
+- Two QR codes on the Connect to Wi-Fi screen — one auto-joins the `PocketReader` network, one links out to the project — generated from PNGs with `tools/image_to_epd.py`
 - Wi-Fi only powers on while the Connect to Wi-Fi screen is open — off the rest of the time (including at boot) to save battery
 - Light-sleeps the ESP32 and puts the e-paper panel to sleep after a minute of inactivity, wakes on any button press
 
@@ -36,12 +37,11 @@ The BOOT button (GPIO0) and REST/RESET button are hardware-level (bootloader / r
 
 Button meaning depends on which screen is showing:
 
-| | Top (Menu) | Bottom (Back) | Dial rotate | Dial press |
+| | Top | Bottom | Dial rotate | Dial press |
 | --- | --- | --- | --- | --- |
-| Reading a book | Previous chapter | Next chapter | Turn page | Open Home menu |
-| Home | Back to book (if one's open) | Select highlighted item | Move selection | Select highlighted item |
-| Choose Book | Back to Home | Open book (hold ~1s to delete) | Move selection | Open highlighted book |
-| Connect to Wi-Fi | Back to Home | Back to Home | — | Back to Home |
+| Reading a book | Previous page (hold to repeat) | Next page (hold to repeat) | Up = previous chapter, down = next chapter | Open Home menu |
+| Home / Choose Book / delete dialog | Move selection up | Move selection down | Up = jump to Home; down on a book in Choose Book opens the delete dialog | Select highlighted item |
+| Connect to Wi-Fi | — | — | Up = back to Home | Back to Home |
 
 ## Display driver
 
@@ -59,7 +59,7 @@ Changing the partition table changes where LittleFS's data physically lives on t
 
 ## Chapters and the EPUB converter
 
-Plain `.txt` has no concept of chapters, so the firmware looks for a form-feed byte (`0x0C`, `'\f'`) in the book to mark chapter boundaries — invisible in the rendered text, just a jump point for Top/Bottom while reading. A hand-typed `.txt` with no form feeds just has one implicit chapter.
+Plain `.txt` has no concept of chapters, so the firmware looks for a form-feed byte (`0x0C`, `'\f'`) in the book to mark chapter boundaries — invisible in the rendered text, just a jump point for the dial while reading. A hand-typed `.txt` with no form feeds just has one implicit chapter.
 
 `tools/epub_to_txt.py` converts an EPUB to a `.txt` with these markers already inserted, using the book's real chapter headings (`<h1>`/`<h2>`/`<h3>`) when present, or one marker per internal chapter file as a fallback:
 
@@ -68,6 +68,17 @@ py tools\epub_to_txt.py yourbook.epub
 ```
 
 Writes `yourbook.txt` next to it — upload that the normal way. Real-world EPUBs vary a lot in how publishers structure their markup, so double-check the first book you convert; if the chapters land in odd places, note which book and it's worth revisiting the detection heuristic.
+
+## Icons and QR codes
+
+`EPD_ShowPicture()` (the vendor driver's bitmap function) takes a 1-bit image packed MSB-first, row-major, with each row padded to a whole byte — not a format any normal image tool exports. `tools/image_to_epd.py` converts a PNG (or the base64 PNG embedded in a `.piskel` file, so hand-drawn icons from [Piskel](https://www.piskelapp.com/) can be used directly with no separate export step) into that format as a ready-to-paste C array:
+
+```powershell
+py tools\image_to_epd.py icon.piskel --name iconName --out firmware\TinyEReader\generated\icon_name.h
+py tools\image_to_epd.py qr.png --name qrName --size 80 --out firmware\TinyEReader\generated\qr_name.h
+```
+
+`--size` resizes to an NxN square using PIL's BOX filter (averages each target pixel over its source region — held up in testing better than nearest-neighbor for QR codes, where a single bad sample can flip a module and break the scan). For a new QR code, verify it still decodes at your target size *from the actual packed bytes*, not just the source image, before wiring it in — a corrupted pack step or a size that's too small can silently produce an unscannable code that still "looks right" in a raw preview.
 
 ## Building
 
@@ -111,8 +122,8 @@ Then open `http://localhost:8787` in Chrome or Edge (Web Serial requires a Chrom
 ## Using it
 
 1. Flash the firmware.
-2. On the device, use the dial to open the Home menu (dial press) and select **Connect to Wi-Fi**.
-3. On your phone/laptop, connect to Wi-Fi network `PocketReader`, password `12345678`.
+2. On the device, press the dial to open the Home menu, move to **Connect to Wi-Fi** with Top/Bottom, and press the dial to select it.
+3. Scan the Wi-Fi QR code with your phone (or connect manually to `PocketReader`, password `12345678`).
 4. Open `http://192.168.4.1` and upload a `.txt` file (or a converted EPUB — see [Chapters](#chapters-and-the-epub-converter)). It becomes the active book immediately.
-5. Back out of the Wi-Fi screen (Top or Back) when done — Wi-Fi turns off automatically.
-6. Use the dial to turn pages, Top/Bottom to skip chapters, dial press for the Home menu.
+5. Press the dial (or turn the dial up) to back out of the Wi-Fi screen when done — Wi-Fi turns off automatically.
+6. Use Top/Bottom to turn pages (hold to keep going), the dial to skip chapters, dial press for the Home menu.
