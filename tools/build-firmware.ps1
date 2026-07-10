@@ -11,7 +11,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $sketch = Join-Path $repoRoot "firmware\TinyEReader"
 $build = Join-Path $repoRoot "firmware\TinyEReader\build"
 $flasherFirmware = Join-Path $repoRoot "tools\web-flasher\firmware"
-$fqbn = "esp32:esp32:esp32s3:FlashSize=8M,PSRAM=opi,PartitionScheme=default_8MB,CDCOnBoot=cdc"
+$fqbn = "esp32:esp32:esp32s3:FlashSize=8M,PSRAM=opi,PartitionScheme=custom,CDCOnBoot=cdc"
 
 $arduinoCli = Join-Path $env:LOCALAPPDATA "Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe"
 if (!(Test-Path $arduinoCli)) {

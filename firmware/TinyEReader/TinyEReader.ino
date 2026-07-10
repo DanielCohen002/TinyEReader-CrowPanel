@@ -13,7 +13,7 @@
   - Chapter skip (Top/Bottom while reading) using form-feed markers a book
     may contain -- see tools/epub_to_txt.py
   - Home menu (Resume Last Book / Choose Book / Connect to Wi-Fi), each
-    screen showing free space remaining out of the 1.5MB library partition
+    screen showing free space remaining out of the ~6.3MB library partition
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
     wakes on any button press
 
@@ -51,7 +51,11 @@ extern uint8_t ImageBW[ALLSCREEN_BYTES];  // Software framebuffer, defined in EP
 const char* AP_NAME = "PocketReader";
 const char* AP_PASS = "12345678";
 
-constexpr size_t MAX_BOOK_SIZE = 600 * 1024;  // per book; LittleFS partition is 1.5MB total
+// Per-book sanity cap. The real limit in practice is whatever free space
+// handleUpload() finds at upload time (see uploadSizeLimit) -- this just
+// stops one absurdly large file from being accepted. See partitions.csv:
+// the LittleFS partition is sized at ~6.3MB of the board's 8MB flash.
+constexpr size_t MAX_BOOK_SIZE = 3 * 1024 * 1024;
 constexpr uint16_t PAGE_HISTORY_LIMIT = 128;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
 constexpr uint8_t MAX_BOOKS = 5;  // library list isn't scrollable yet -- keep it to what fits on screen
@@ -119,7 +123,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
 </head>
 <body>
   <h1>PocketReader</h1>
-  <p>Uploading adds a new book to your library (up to 600KB per book). It becomes the active book right away.</p>
+  <p>Uploading adds a new book to your library (up to 3MB per book). It becomes the active book right away.</p>
   <form method="POST" action="/upload" enctype="multipart/form-data">
     <input type="file" name="file" accept=".txt,text/plain">
     <button type="submit">Upload TXT</button>
@@ -434,7 +438,7 @@ void handleUpload() {
 // headers (ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_LENGTH in Chrome).
 void handleUploadComplete() {
   if (tooLarge) {
-    server.send(413, "text/plain", "File too large or library full (limit 600KB per book)");
+    server.send(413, "text/plain", "File too large or library full (limit 3MB per book)");
     return;
   }
 
@@ -728,8 +732,7 @@ void handleButtons() {
           chooseSelection = (chooseSelection + bookCount - 1) % bookCount;
           renderChooseBook();
         }
-        if (dialPressTapped) openBook(bookList[chooseSelection]);
-        if (backTapped) openBook(bookList[chooseSelection]);
+        if (backTapped || dialPressTapped) openBook(bookList[chooseSelection]);
         if (backLongPress) deleteSelectedBook();
       }
       if (menuTapped) enterHome();
