@@ -51,8 +51,7 @@ constexpr uint16_t TOP_MARGIN = 2;
 constexpr uint16_t LINE_HEIGHT = 18;
 constexpr uint8_t LINE_FONT = 16;
 constexpr uint8_t CHARS_PER_LINE = 30;
-constexpr uint8_t MAX_LINES = 5;
-constexpr uint8_t FOOTER_FONT = 12;
+constexpr uint8_t MAX_LINES = 6;
 
 WebServer server(80);
 
@@ -297,10 +296,6 @@ void renderPageAt(uint32_t offset, bool rememberPrevious) {
   for (uint8_t i = 0; i < lineCount; i++) {
     EPD_ShowString(LEFT_MARGIN, TOP_MARGIN + (i * LINE_HEIGHT), lines[i].c_str(), BLACK, LINE_FONT);
   }
-
-  char footer[24];
-  snprintf(footer, sizeof(footer), "%lu/%lu", (unsigned long)pageEnd, (unsigned long)fileSize);
-  EPD_ShowString(LEFT_MARGIN, EPD_H - FOOTER_FONT - 1, footer, BLACK, FOOTER_FONT);
 
   endFrame();
 

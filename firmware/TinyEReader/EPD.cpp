@@ -5,11 +5,11 @@
 uint8_t ImageBW[ALLSCREEN_BYTES];
 
 /**
- * @brief       在EPD上画一个点
- * @param       x:像素点列坐标
- * @param       y:像素点行坐标
- * @param       color:填充颜色值
- * @retval      无
+ * @brief       Draw a single pixel
+ * @param       x: pixel column
+ * @param       y: pixel row
+ * @param       color: pixel color
+ * @retval      none
  */
 void EPD_DrawPoint(uint16_t x, uint16_t y, uint8_t color)
 {
@@ -54,30 +54,30 @@ void EPD_DrawPoint(uint16_t x, uint16_t y, uint8_t color)
 }
 
 /**
- * @brief       两点之间画线函数
- * @param       xs:画线的起始列坐标
- * @param       ys:画线的起始行坐标
- * @param       xe:画线的结束列坐标
- * @param       ye:画线的结束行坐标
- * @param       color:画线的颜色值
- * @retval      无
+ * @brief       Draw a line between two points
+ * @param       xs: start column
+ * @param       ys: start row
+ * @param       xe: end column
+ * @param       ye: end row
+ * @param       color: line color
+ * @retval      none
  */
 void EPD_DrawLine(uint16_t xs, uint16_t ys, uint16_t xe, uint16_t ye, uint8_t color)
 {
     uint16_t t;
     int xerr = 0, yerr = 0, delta_x, delta_y, distance;
     int incx, incy, uRow, uCol;
-    delta_x = xe - xs; // 计算坐标增量
+    delta_x = xe - xs; // coordinate deltas
     delta_y = ye - ys;
     uRow = xs;
     uCol = ys;
     if (delta_x > 0)
     {
-        incx = 1; // 设置单步方向
+        incx = 1; // step direction
     }
     else if (delta_x == 0)
     {
-        incx = 0; // 垂直线
+        incx = 0; // vertical line
     }
     else
     {
@@ -90,7 +90,7 @@ void EPD_DrawLine(uint16_t xs, uint16_t ys, uint16_t xe, uint16_t ye, uint8_t co
     }
     else if (delta_y == 0)
     {
-        incy = 0; // 水平线
+        incy = 0; // horizontal line
     }
     else
     {
@@ -99,15 +99,15 @@ void EPD_DrawLine(uint16_t xs, uint16_t ys, uint16_t xe, uint16_t ye, uint8_t co
     }
     if (delta_x > delta_y)
     {
-        distance = delta_x; // 选取基本增量坐标轴
+        distance = delta_x; // pick the dominant axis
     }
     else
     {
         distance = delta_y;
     }
-    for (t = 0; t <= distance + 1; t++) // 画线输出
+    for (t = 0; t <= distance + 1; t++) // step along the line
     {
-        EPD_DrawPoint(uRow, uCol, color); // 画点
+        EPD_DrawPoint(uRow, uCol, color); // plot the point
         xerr += delta_x;
         yerr += delta_y;
         if (xerr > distance)
@@ -124,13 +124,13 @@ void EPD_DrawLine(uint16_t xs, uint16_t ys, uint16_t xe, uint16_t ye, uint8_t co
 }
 
 /**
- * @brief       绘制空心矩形函数
- * @param       xs:矩形的起始列坐标
- * @param       ys:矩形的起始行坐标
- * @param       xe:矩形的结束列坐标
- * @param       ye:矩形的结束行坐标
- * @param       color:矩形的颜色值
- * @retval      无
+ * @brief       Draw a hollow rectangle
+ * @param       xs: start column
+ * @param       ys: start row
+ * @param       xe: end column
+ * @param       ye: end row
+ * @param       color: rectangle color
+ * @retval      none
  */
 void EPD_DrawRectangle(uint16_t xs, uint16_t ys, uint16_t xe, uint16_t ye, uint8_t color)
 {
@@ -141,13 +141,13 @@ void EPD_DrawRectangle(uint16_t xs, uint16_t ys, uint16_t xe, uint16_t ye, uint8
 }
 
 /**
- * @brief       8分法绘制圆形(内部调用)
- * @param       xc:圆心列坐标
- * @param       yc:圆心行坐标
- * @param       x:相对于圆心的列坐标
- * @param       y:相对于圆心的行坐标
- * @param       color:圆形的颜色值
- * @retval      无
+ * @brief       8-way circle plot (internal use)
+ * @param       xc: circle center column
+ * @param       yc: circle center row
+ * @param       x: column relative to center
+ * @param       y: row relative to center
+ * @param       color: circle color
+ * @retval      none
  */
 void Draw_Circle(int xc, int yc, int x, int y, uint8_t color)
 {
@@ -162,19 +162,19 @@ void Draw_Circle(int xc, int yc, int x, int y, uint8_t color)
 }
 
 /**
- * @brief       绘制圆形
- * @param       xc:圆心列坐标
- * @param       yc:圆心行坐标
- * @param       r:圆形半径
- * @param       color:圆形的颜色值
- * @param       mode:是否填充圆形
- * @retval      无
+ * @brief       Draw a circle
+ * @param       xc: circle center column
+ * @param       yc: circle center row
+ * @param       r: radius
+ * @param       color: circle color
+ * @param       mode: whether to fill the circle
+ * @retval      none
  */
 void EPD_DrawCircle(uint16_t xc, uint16_t yc, uint16_t r, uint8_t color, uint16_t mode)
 {
     int x = 0, y = r, yi, d;
     d = 3 - 2 * r;
-    /*绘制实心圆*/
+    /* filled circle */
     if (mode)
     {
         while (x <= y)
@@ -195,7 +195,7 @@ void EPD_DrawCircle(uint16_t xc, uint16_t yc, uint16_t r, uint8_t color, uint16_
             x++;
         }
     }
-    /*绘制空心圆*/
+    /* hollow circle */
     else
     {
         while (x <= y)
@@ -216,15 +216,15 @@ void EPD_DrawCircle(uint16_t xc, uint16_t yc, uint16_t r, uint8_t color, uint16_
 }
 
 /**
- * @brief       绘制空心三角形
- * @param       x:三角形坐标列起始坐标
- * @param       y:三角形坐标行起始坐标
- * @param       xs:三角形顶点列坐标
- * @param       ys:三角形顶点行坐标
- * @param       xe:三角形末端列坐标
- * @param       ye:三角形末端行坐标
- * @param       color:三角形的颜色值
- * @retval      无
+ * @brief       Draw a hollow triangle
+ * @param       x: first vertex column
+ * @param       y: first vertex row
+ * @param       xs: second vertex column
+ * @param       ys: second vertex row
+ * @param       xe: third vertex column
+ * @param       ye: third vertex row
+ * @param       color: triangle color
+ * @retval      none
  */
 void EPD_DrawTriangel(uint16_t x, uint16_t y, uint16_t xs, uint16_t ys, uint16_t xe, uint16_t ye, uint8_t color)
 {
@@ -234,41 +234,41 @@ void EPD_DrawTriangel(uint16_t x, uint16_t y, uint16_t xs, uint16_t ys, uint16_t
 }
 
 /**
- * @brief       显示单个字符
- * @param       x:字符显示位置列起始坐标
- * @param       y:字符显示位置行起始坐标
- * @param       num:显示字符的ASCII码
- * @param       color:字符颜色
- * @param       sizey:字符大小
- * @retval      无
+ * @brief       Draw a single character
+ * @param       x: column to draw at
+ * @param       y: row to draw at
+ * @param       num: ASCII code of the character
+ * @param       color: character color
+ * @param       sizey: font size (pixel height)
+ * @retval      none
  */
 void EPD_ShowChar(uint16_t x, uint16_t y, uint8_t num, uint8_t color, uint8_t sizey)
 {
     uint8_t temp, sizex, t;
-    uint16_t i, TypefaceNum; // 一个字符所占字节大小
+    uint16_t i, TypefaceNum; // bytes occupied by one character's glyph
     uint16_t x0 = x;
     sizex = sizey / 2;
     TypefaceNum = (sizex / 8 + ((sizex % 8) ? 1 : 0)) * sizey;
-    num = num - ' '; // 得到偏移后的值
+    num = num - ' '; // offset into the font table
     for (i = 0; i < TypefaceNum; i++)
     {
         if (sizey == 12)
-            temp = ascii_1206[num][i]; // 调用6x12字体
+            temp = ascii_1206[num][i]; // 6x12 font
         else if (sizey == 16)
-            temp = ascii_1608[num][i]; // 调用8x16字体
+            temp = ascii_1608[num][i]; // 8x16 font
         else if (sizey == 24)
-            temp = ascii_2412[num][i]; // 调用12x24字体
+            temp = ascii_2412[num][i]; // 12x24 font
         else if (sizey == 32)
-            temp = ascii_3216[num][i]; // 调用16x32字体
+            temp = ascii_3216[num][i]; // 16x32 font
         else if (sizey == 48)
-            temp = ascii_4824[num][i]; // 调用24x48字体
+            temp = ascii_4824[num][i]; // 24x48 font
         else
             return;
         for (t = 0; t < 8; t++)
         {
             if (temp & (0x01 << t))
             {
-                EPD_DrawPoint(x, y, color); // 画一个点
+                EPD_DrawPoint(x, y, color); // foreground pixel
             }
             else
             {
@@ -286,17 +286,17 @@ void EPD_ShowChar(uint16_t x, uint16_t y, uint8_t num, uint8_t color, uint8_t si
 }
 
 /**
- * @brief       显示字符串
- * @param       x:字符串显示位置列起始坐标
- * @param       y:字符串显示位置行起始坐标
- * @param       *s:显示的字符串内容
- * @param       color:字符颜色
- * @param       sizey:字符大小
- * @retval      无
+ * @brief       Draw a string
+ * @param       x: column to start at
+ * @param       y: row to start at
+ * @param       *s: string to draw
+ * @param       color: character color
+ * @param       sizey: font size (pixel height)
+ * @retval      none
  */
 void EPD_ShowString(uint16_t x, uint16_t y, const char *s, uint8_t color, uint16_t sizey)
 {
-    while ((*s <= '~') && (*s >= ' ')) // 判断是不是非法字符
+    while ((*s <= '~') && (*s >= ' ')) // stop at non-printable characters
     {
         if (x > (EPD_W - 1) || y > (EPD_H - 1))
             return;
@@ -307,10 +307,10 @@ void EPD_ShowString(uint16_t x, uint16_t y, const char *s, uint8_t color, uint16
 }
 
 /**
- * @brief       幂运算(内部调用)
- * @param       m:底数
- * @param       n:指数
- * @retval      result:m的n次幂
+ * @brief       Integer power (internal use)
+ * @param       m: base
+ * @param       n: exponent
+ * @retval      result: m raised to the n
  */
 uint32_t mypow(uint8_t m, uint8_t n)
 {
@@ -323,14 +323,14 @@ uint32_t mypow(uint8_t m, uint8_t n)
 }
 
 /**
- * @brief       显示数字
- * @param       x:数字显示位置列起始坐标
- * @param       y:数字显示位置行起始坐标
- * @param       num:显示的数字(0~4294967295)
- * @param       len:显示数字的位数
- * @param       color:字符颜色
- * @param       sizey:字符大小
- * @retval      无
+ * @brief       Draw a number
+ * @param       x: column to start at
+ * @param       y: row to start at
+ * @param       num: number to draw (0~4294967295)
+ * @param       len: number of digits to draw
+ * @param       color: character color
+ * @param       sizey: font size (pixel height)
+ * @retval      none
  */
 void EPD_ShowNum(uint16_t x, uint16_t y, uint32_t num, uint8_t len, uint8_t color, uint8_t sizey)
 {
@@ -356,15 +356,15 @@ void EPD_ShowNum(uint16_t x, uint16_t y, uint32_t num, uint8_t len, uint8_t colo
 }
 
 /**
- * @brief       显示浮点数
- * @param       x:数字显示位置列起始坐标
- * @param       y:数字显示位置行起始坐标
- * @param       num:显示的浮点数
- * @param       pre:显示浮点数精度
- * @param       len:显示浮点数的位数(不包含小数点)
- * @param       color:字符颜色
- * @param       sizey:字符大小
- * @retval      无
+ * @brief       Draw a floating point number
+ * @param       x: column to start at
+ * @param       y: row to start at
+ * @param       num: value to draw
+ * @param       pre: decimal precision to draw
+ * @param       len: total digits to draw (excluding the decimal point)
+ * @param       color: character color
+ * @param       sizey: font size (pixel height)
+ * @retval      none
  */
 void EPD_ShowFloatNum(uint16_t x, uint16_t y, float num, uint8_t pre, uint8_t len, uint8_t color, uint8_t sizey)
 {
@@ -386,21 +386,21 @@ void EPD_ShowFloatNum(uint16_t x, uint16_t y, float num, uint8_t pre, uint8_t le
 
 
 /**
- * @brief       图片显示函数
- * @param       x:图片显示位置列起始坐标
- * @param       y:图片显示位置行起始坐标
- * @param       width:图片宽度
- * @param       height:图片高度
- * @param       pic:图片取模数组
- * @param       color:图片颜色
- * @note        图片宽度宽度限制248以下包含248
- * @retval      无
+ * @brief       Draw a 1-bit bitmap
+ * @param       x: column to start at
+ * @param       y: row to start at
+ * @param       width: bitmap width
+ * @param       height: bitmap height
+ * @param       pic: bitmap data
+ * @param       color: bitmap color
+ * @note        Bitmap width must be 248px or less
+ * @retval      none
  */
 void EPD_ShowPicture(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint8_t pic[], uint8_t color)
 {
     uint8_t t, temp;
     uint16_t x0 = x;
-    uint32_t i, TypefaceNum; // 一个图片所占字节大小
+    uint32_t i, TypefaceNum; // bytes occupied by one bitmap
     TypefaceNum = ((width % 8) ? (width / 8 + 1) : (width / 8)) * height;
     for (i = 0; i < TypefaceNum; i++)
     {
@@ -427,15 +427,15 @@ void EPD_ShowPicture(uint16_t x, uint16_t y, uint16_t width, uint16_t height, co
 }
 
 /**
- * @brief       利用字符函数实现秒表UI
- * @param       x:UI显示位置列起始坐标
- * @param       y:UI显示位置行起始坐标
- * @param       num:显示的浮点数
- * @param       pre:显示浮点数精度
- * @param       len:显示浮点数的位数(不包含小数点)
- * @param       color:字符颜色
- * @param       sizey:字符大小
- * @retval      无
+ * @brief       Draw a stopwatch-style HH:MM/MM:SS readout using the character functions
+ * @param       x: column to start at
+ * @param       y: row to start at
+ * @param       num: value to draw
+ * @param       pre: decimal precision to draw
+ * @param       len: total digits to draw (excluding the colon)
+ * @param       color: character color
+ * @param       sizey: font size (pixel height)
+ * @retval      none
  */
 void EPD_ShowWatch(uint16_t x, uint16_t y, float num, uint8_t pre, uint8_t len, uint8_t color, uint8_t sizey)
 {

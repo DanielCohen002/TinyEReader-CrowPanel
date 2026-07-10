@@ -3,7 +3,7 @@
 
 #include "spi.h"
 
-/* 定义墨水屏显示方向 */
+/* Display orientation */
 #define USE_HORIZONTIAL 2 /* 0 1 2 3 */
 #if USE_HORIZONTIAL == 0 | USE_HORIZONTIAL == 2
 #define EPD_W 250
@@ -14,12 +14,12 @@
 #define EPD_H 250
 #define ALLSCREEN_BYTES ((EPD_W % 8) ? (EPD_W / 8 + 1) : (EPD_W / 8)) * EPD_H
 #endif
-/* 定义颜色参数 */
-/* R24H:黑色像素写0 白色像素写1 */
+/* Color constants */
+/* R24H register: write 0 for a black pixel, 1 for a white pixel */
 #define WHITE 0xFF
 #define BLACK 0x00
 
-/* 函数说明 */
+/* Function declarations */
 void EPD_READBUSY(void);
 void EPD_HW_SW_RESET(void);
 void EPD_Sleep(void);
