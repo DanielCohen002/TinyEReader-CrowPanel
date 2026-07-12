@@ -197,8 +197,14 @@ const char uploadPage[] PROGMEM = R"rawliteral(
     h2 { font-size: 1rem; margin: 1.75rem 0 0.5rem; }
     .lib-meta { font-size: 0.85rem; color: #6b6357; margin: 0 0 0.5rem; }
     ul.lib { list-style: none; margin: 0; padding: 0; font-size: 0.9rem; }
-    ul.lib li { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.35rem 0; border-top: 1px solid #ece7dc; }
+    ul.lib li { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-top: 1px solid #ece7dc; }
+    ul.lib li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     ul.lib li .size { color: #8a8072; white-space: nowrap; }
+    ul.lib li .del {
+      flex: none; width: auto; margin-top: 0; padding: 0.2rem 0.55rem; font-size: 0.8rem;
+      border: 1px solid #c9c0b0; border-radius: 0.35rem; background: transparent; color: #8a6b5c;
+    }
+    ul.lib li .del:hover { border-color: #b03a2e; color: #b03a2e; }
     .empty { color: #8a8072; font-size: 0.9rem; }
     @media (prefers-color-scheme: dark) {
       body { background: #171512; color: #ece7dc; }
@@ -209,6 +215,8 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       button { background: #ece7dc; color: #201d19; }
       button:disabled { background: #4a4438; color: #a49b8a; }
       ul.lib li { border-top-color: #332e27; }
+      ul.lib li .del { border-color: #4a4438; color: #c9b8a8; background: transparent; }
+      ul.lib li .del:hover { border-color: #d47a6a; color: #d47a6a; }
     }
   </style>
 </head>
@@ -266,17 +274,31 @@ const char uploadPage[] PROGMEM = R"rawliteral(
         data.books.forEach(function (b) {
           var li = document.createElement('li');
           var name = document.createElement('span');
+          name.className = 'name';
           name.textContent = b.name;
           var size = document.createElement('span');
           size.className = 'size';
           size.textContent = fmtSize(b.size);
+          var del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'del';
+          del.textContent = 'Delete';
+          del.addEventListener('click', function () { deleteBook(b.name); });
           li.appendChild(name);
           li.appendChild(size);
+          li.appendChild(del);
           list.appendChild(li);
         });
       }).catch(function () {
         document.getElementById('libMeta').textContent = '';
       });
+    }
+
+    function deleteBook(name) {
+      if (!confirm('Delete "' + name + '"? This can\'t be undone.')) return;
+      fetch('/delete?name=' + encodeURIComponent(name), { method: 'POST' })
+        .then(refreshLibrary)
+        .catch(refreshLibrary);
     }
 
     function setPicked(fileList) {
@@ -540,9 +562,10 @@ void listBooks() {
 void renderChooseBook();
 void scrollChooseWindow();
 
-void deleteSelectedBook() {
-  if (bookCount == 0) return;
-  String name = bookList[chooseSelection];
+// Shared by the on-device delete flow and the web /delete endpoint. Returns
+// false if the book didn't exist (nothing to delete).
+bool deleteBookFile(const String& name) {
+  if (!LittleFS.exists(bookPath(name))) return false;
 
   if (name == currentBookName) {
     if (book) book.close();
@@ -552,6 +575,12 @@ void deleteSelectedBook() {
 
   LittleFS.remove(bookPath(name));
   LittleFS.remove(posPath(name));
+  return true;
+}
+
+void deleteSelectedBook() {
+  if (bookCount == 0) return;
+  deleteBookFile(bookList[chooseSelection]);
 
   listBooks();
   if (bookCount == 0) {
@@ -735,6 +764,18 @@ void handleUploadComplete() {
   server.send(200, "text/plain", "Upload complete: " + uploadName);
 }
 
+void handleDeleteBook() {
+  touchActivity();
+  // Reuses the same sanitizer as uploads so this can't be pointed outside
+  // /books via the name query param.
+  String name = sanitizeFilename(server.arg("name"));
+  if (!deleteBookFile(name)) {
+    server.send(404, "text/plain", "Book not found: " + name);
+    return;
+  }
+  server.send(200, "text/plain", "Deleted: " + name);
+}
+
 // Routes are registered once, at boot, regardless of Wi-Fi state --
 // registering them doesn't require Wi-Fi to be up. setupWebServer() itself
 // gets called every time the Wi-Fi screen is entered (and after waking from
@@ -743,6 +784,7 @@ void handleUploadComplete() {
 void registerWebRoutes() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/books", HTTP_GET, handleBooksList);
+  server.on("/delete", HTTP_POST, handleDeleteBook);
   server.on("/upload", HTTP_POST, handleUploadComplete, handleUpload);
 }
 
