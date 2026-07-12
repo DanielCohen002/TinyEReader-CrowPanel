@@ -1005,11 +1005,6 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
 }
 
 void renderPageAt(uint32_t offset) {
-  if (currentBookName.length() == 0 || !LittleFS.exists(bookPath(currentBookName))) {
-    showMessage("Upload a TXT at\n192.168.4.1\nor press Menu\nfor the Home screen");
-    return;
-  }
-
   reopenBookAt(offset);
   if (!book) {
     showMessage("Book open failed");
@@ -1386,11 +1381,13 @@ void setup() {
     currentBookName = (bookCount > 0) ? bookList[0] : "";
   }
 
+  // Loads/indexes the last book (if any) so Resume Last Book is instant,
+  // but boots to the Home screen rather than straight into reading.
   uint32_t saved = currentBookName.length() > 0 ? loadSavedPosition(currentBookName) : 0;
   reopenBookAt(saved);
   indexChapters();
-  currentScreen = SCREEN_READING;
-  renderPageAt(saved);
+  currentScreen = SCREEN_HOME;
+  renderHome();
 }
 
 void loop() {
