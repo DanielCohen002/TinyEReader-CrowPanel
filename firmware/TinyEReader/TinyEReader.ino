@@ -168,6 +168,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
     h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
     .sub { color: #6b6357; font-size: 0.9rem; margin: 0 0 1.25rem; }
     .drop {
+      display: block; box-sizing: border-box;
       border: 2px dashed #c9c0b0; border-radius: 0.6rem; padding: 1.5rem 1rem;
       text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s;
     }
