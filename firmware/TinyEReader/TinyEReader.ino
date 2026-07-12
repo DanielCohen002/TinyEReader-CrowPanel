@@ -215,7 +215,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
 <body>
   <div class="card">
     <h1>PocketReader</h1>
-    <p class="sub">Upload one or more .txt books (up to 3MB each). The last one uploaded becomes the active book.</p>
+    <p class="sub">Upload one or more .txt books (up to 3MB each). Open a book from the device's Choose Book screen.</p>
 
     <form id="form">
       <label class="drop" id="drop" for="file">
@@ -302,7 +302,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       setPicked(e.dataTransfer.files);
     });
 
-    function uploadOne(file, isLast) {
+    function uploadOne(file) {
       return new Promise(function (resolve) {
         var row = document.createElement('div');
         row.className = 'file-row';
@@ -316,7 +316,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
         filesBox.appendChild(row);
 
         var xhr = new XMLHttpRequest();
-        xhr.open('POST', '/upload?open=' + (isLast ? '1' : '0'));
+        xhr.open('POST', '/upload');
         xhr.upload.onprogress = function (e) {
           if (e.lengthComputable) status.textContent = Math.round((e.loaded / e.total) * 100) + '%';
         };
@@ -347,8 +347,8 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       go.disabled = true;
       filesBox.innerHTML = '';
       var chain = Promise.resolve();
-      picked.forEach(function (file, i) {
-        chain = chain.then(function () { return uploadOne(file, i === picked.length - 1); });
+      picked.forEach(function (file) {
+        chain = chain.then(function () { return uploadOne(file); });
       });
       chain.then(function () {
         picked = [];
@@ -693,10 +693,9 @@ void handleUploadComplete() {
     return;
   }
 
-  // The upload page batches multi-file selections into one request per file
-  // and only asks to open the last one, so picking several books doesn't
-  // flash the e-paper panel open on every single file in the batch.
-  if (server.arg("open") != "0") openBook(uploadName);
+  // Deliberately doesn't open the book -- uploading just adds it to the
+  // library so the page stays put for uploading more. Open it from the
+  // device's Choose Book screen.
   server.send(200, "text/plain", "Upload complete: " + uploadName);
 }
 
