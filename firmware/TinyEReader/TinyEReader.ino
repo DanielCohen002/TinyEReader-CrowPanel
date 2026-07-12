@@ -223,14 +223,14 @@ const char uploadPage[] PROGMEM = R"rawliteral(
 <body>
   <div class="card">
     <h1>PocketReader</h1>
-    <p class="sub">Upload one or more .txt books. Open a book from the device's Choose Book screen.</p>
+    <p class="sub">Upload one or more .txt or .epub books (EPUBs are converted automatically). Open a book from the device's Choose Book screen.</p>
 
     <form id="form">
       <label class="drop" id="drop" for="file">
         <p id="dropLabel">Tap to choose books</p>
-        <p class="hint">or drag &amp; drop .txt files here</p>
+        <p class="hint">or drag &amp; drop .txt/.epub files here</p>
       </label>
-      <input type="file" id="file" name="file" accept=".txt,text/plain" multiple>
+      <input type="file" id="file" name="file" accept=".txt,.epub,text/plain,application/epub+zip" multiple>
       <button type="submit" id="go" disabled>Upload</button>
     </form>
     <div class="files" id="files"></div>
@@ -240,6 +240,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
     <ul class="lib" id="libList"></ul>
   </div>
 
+  <script src="epub-to-txt.js"></script>
   <script>
     var fileInput = document.getElementById('file');
     var drop = document.getElementById('drop');
@@ -301,9 +302,12 @@ const char uploadPage[] PROGMEM = R"rawliteral(
         .catch(refreshLibrary);
     }
 
+    function isEpub(file) { return /\.epub$/i.test(file.name); }
+    function isTxt(file) { return /\.txt$/i.test(file.name); }
+
     function setPicked(fileList) {
       picked = Array.prototype.filter.call(fileList, function (f) {
-        return f.name.toLowerCase().endsWith('.txt');
+        return isTxt(f) || isEpub(f);
       });
       dropLabel.textContent = picked.length === 0
         ? 'Tap to choose books'
@@ -324,11 +328,11 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       setPicked(e.dataTransfer.files);
     });
 
-    function addFileRow(file) {
+    function addFileRow(displayName) {
       var row = document.createElement('div');
       row.className = 'file-row';
       var name = document.createElement('span');
-      name.textContent = file.name;
+      name.textContent = displayName;
       var status = document.createElement('span');
       status.className = 'status';
       row.appendChild(name);
@@ -337,9 +341,31 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       return { row: row, status: status };
     }
 
-    function uploadOne(file) {
+    function bookTitleFromFilename(name) {
+      return name.replace(/\.(txt|epub)$/i, '');
+    }
+
+    // Runs epubToTxt() (from epub-to-txt.js) on an .epub File and returns a
+    // plain-text File with the same base name, reusing the same row (r) the
+    // caller already created so the status label just updates in place
+    // rather than the row disappearing and a new one appearing.
+    function convertIfNeeded(file, r) {
+      if (!isEpub(file)) return Promise.resolve(file);
+      r.status.textContent = 'Converting...';
+      return file.arrayBuffer().then(function (buf) {
+        return window.epubToTxt(buf);
+      }).then(function (text) {
+        return new File([text], bookTitleFromFilename(file.name) + '.txt', { type: 'text/plain' });
+      }).catch(function (err) {
+        console.error('EPUB conversion failed for', file.name, err);
+        r.row.classList.add('error');
+        r.status.textContent = 'Conversion failed';
+        return null;
+      });
+    }
+
+    function uploadOne(file, r) {
       return new Promise(function (resolve) {
-        var r = addFileRow(file);
         r.status.textContent = '0%';
 
         var xhr = new XMLHttpRequest();
@@ -388,19 +414,36 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       go.disabled = true;
       filesBox.innerHTML = '';
 
-      fetch('/books').then(function (r) { return r.json(); }).then(function (data) {
-        var fits = planQueue(picked, data.freeBytes, data.maxSize);
-        var chain = Promise.resolve();
-        picked.forEach(function (file, i) {
-          if (fits[i]) {
-            chain = chain.then(function () { return uploadOne(file); });
-          } else {
-            var r = addFileRow(file);
-            r.row.classList.add('error');
-            r.status.textContent = "Won't fit - skipped";
-          }
+      // One row per originally-picked file, created up front so its status
+      // label can just update in place through convert -> upload rather than
+      // rows disappearing/reappearing as files get transformed.
+      var rows = picked.map(function (file) { return addFileRow(file.name); });
+
+      var converted = picked.reduce(function (chain, file, i) {
+        return chain.then(function (acc) {
+          return convertIfNeeded(file, rows[i]).then(function (result) {
+            if (result) acc.push({ file: result, row: rows[i] });
+            return acc;
+          });
         });
-        return chain;
+      }, Promise.resolve([]));
+
+      converted.then(function (ready) {
+        if (ready.length === 0) return Promise.resolve();
+        return fetch('/books').then(function (r) { return r.json(); }).then(function (data) {
+          var files = ready.map(function (item) { return item.file; });
+          var fits = planQueue(files, data.freeBytes, data.maxSize);
+          var chain = Promise.resolve();
+          ready.forEach(function (item, i) {
+            if (fits[i]) {
+              chain = chain.then(function () { return uploadOne(item.file, item.row); });
+            } else {
+              item.row.row.classList.add('error');
+              item.row.status.textContent = "Won't fit - skipped";
+            }
+          });
+          return chain;
+        });
       }).then(function () {
         picked = [];
         fileInput.value = '';
@@ -413,6 +456,218 @@ const char uploadPage[] PROGMEM = R"rawliteral(
   </script>
 </body>
 </html>
+)rawliteral";
+
+// Client-side EPUB-to-.txt converter, served at /epub-to-txt.js and loaded
+// by uploadPage above. Runs entirely in the browser (this device has no
+// internet access to fetch a library from, and parsing a whole EPUB on the
+// ESP32 itself isn't worth the flash/RAM/complexity) -- unzips the EPUB with
+// a small hand-rolled zip reader (using the browser's own DecompressionStream
+// for the actual inflate), then walks each spine document's HTML with
+// DOMParser to extract plain text, inserting a form-feed chapter marker at
+// each real <h1>/<h2>/<h3> heading (or one marker per spine file if the book
+// has fewer than 2 headings total) -- the same logic as tools/epub_to_txt.py,
+// kept in sync with it by hand since there's no build step to share the two.
+const char epubToTxtScript[] PROGMEM = R"rawliteral(
+(function () {
+  'use strict';
+
+  function normalizePath(path) {
+    var parts = path.split('/');
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      if (part === '' || part === '.') continue;
+      if (part === '..') out.pop();
+      else out.push(part);
+    }
+    return out.join('/');
+  }
+
+  function readZip(buf) {
+    var view = new DataView(buf);
+    var bytes = new Uint8Array(buf);
+    var eocdSig = 0x06054b50;
+    var pos = -1;
+    var minPos = Math.max(0, bytes.length - 65557);
+    for (var i = bytes.length - 22; i >= minPos; i--) {
+      if (view.getUint32(i, true) === eocdSig) { pos = i; break; }
+    }
+    if (pos === -1) throw new Error("Not a valid EPUB (zip end-of-directory record not found).");
+
+    var cdEntries = view.getUint16(pos + 10, true);
+    var cdOffset = view.getUint32(pos + 16, true);
+
+    var entries = {};
+    var offset = cdOffset;
+    for (var e = 0; e < cdEntries; e++) {
+      var sig = view.getUint32(offset, true);
+      if (sig !== 0x02014b50) throw new Error("Corrupt EPUB (bad zip central directory entry).");
+      var method = view.getUint16(offset + 10, true);
+      var compSize = view.getUint32(offset + 20, true);
+      var nameLen = view.getUint16(offset + 28, true);
+      var extraLen = view.getUint16(offset + 30, true);
+      var commentLen = view.getUint16(offset + 32, true);
+      var localOffset = view.getUint32(offset + 42, true);
+      var name = new TextDecoder('utf-8').decode(bytes.subarray(offset + 46, offset + 46 + nameLen));
+      entries[name] = { method: method, compSize: compSize, localOffset: localOffset };
+      offset += 46 + nameLen + extraLen + commentLen;
+    }
+
+    async function readEntry(name) {
+      var meta = entries[name];
+      if (!meta) throw new Error('Missing "' + name + '" in EPUB.');
+      var lo = meta.localOffset;
+      var lNameLen = view.getUint16(lo + 26, true);
+      var lExtraLen = view.getUint16(lo + 28, true);
+      var dataStart = lo + 30 + lNameLen + lExtraLen;
+      var compData = bytes.subarray(dataStart, dataStart + meta.compSize);
+      if (meta.method === 0) return compData;
+      if (meta.method === 8) {
+        if (typeof DecompressionStream === 'undefined') {
+          throw new Error("This browser can't unzip EPUBs (no DecompressionStream support) -- try a newer version of Chrome, Edge, Firefox, or Safari, or use tools/epub_to_txt.py instead.");
+        }
+        var stream = new Blob([compData]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        var out = await new Response(stream).arrayBuffer();
+        return new Uint8Array(out);
+      }
+      throw new Error('Unsupported zip compression method ' + meta.method + ' for "' + name + '".');
+    }
+
+    return { readEntry: readEntry };
+  }
+
+  function getByLocalName(doc, localName) {
+    var all = doc.getElementsByTagName('*');
+    var out = [];
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].localName === localName) out.push(all[i]);
+    }
+    return out;
+  }
+
+  var HEADING_TAGS = { H1: true, H2: true, H3: true };
+  var SKIP_TAGS = { SCRIPT: true, STYLE: true, HEAD: true };
+  var BLOCK_TAGS = { P: true, DIV: true, LI: true, TR: true, BLOCKQUOTE: true, BR: true };
+
+  function extractChapterAwareText(html) {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var chunks = [];
+    var headingOffsets = [];
+    var length = 0;
+    var atLineStart = true;
+
+    function emit(text) {
+      if (!text) return;
+      chunks.push(text);
+      length += text.length;
+      atLineStart = text.charAt(text.length - 1) === '\n';
+    }
+    function breakParagraph() {
+      if (!atLineStart) emit('\n\n');
+    }
+    function walk(node) {
+      if (node.nodeType === 3) {  // TEXT_NODE
+        var text = node.nodeValue.replace(/[ \t\r\f\v]+/g, ' ');
+        if (text.trim() === '') return;
+        if (atLineStart) text = text.replace(/^ +/, '');
+        emit(text);
+        return;
+      }
+      if (node.nodeType !== 1) return;  // ELEMENT_NODE
+      var tag = node.tagName;
+      if (SKIP_TAGS[tag]) return;
+      var isHeading = HEADING_TAGS[tag];
+      var isBlock = BLOCK_TAGS[tag];
+      if (isHeading) {
+        breakParagraph();
+        headingOffsets.push(length);
+      } else if (isBlock) {
+        breakParagraph();
+      }
+      for (var c = 0; c < node.childNodes.length; c++) walk(node.childNodes[c]);
+      if (isHeading || isBlock) breakParagraph();
+    }
+    walk(doc.body || doc.documentElement);
+    return { text: chunks.join('').trim(), headingOffsets: headingOffsets };
+  }
+
+  async function epubToTxt(arrayBuffer) {
+    var zip = readZip(arrayBuffer);
+
+    var containerBytes = await zip.readEntry('META-INF/container.xml');
+    var containerXml = new DOMParser().parseFromString(new TextDecoder('utf-8').decode(containerBytes), 'application/xml');
+    var rootfiles = getByLocalName(containerXml, 'rootfile');
+    if (rootfiles.length === 0) throw new Error("Could not find the EPUB's content file (missing container.xml rootfile).");
+    var opfPath = rootfiles[0].getAttribute('full-path');
+    var opfDir = opfPath.indexOf('/') === -1 ? '' : opfPath.substring(0, opfPath.lastIndexOf('/'));
+
+    var opfBytes = await zip.readEntry(opfPath);
+    var opfXml = new DOMParser().parseFromString(new TextDecoder('utf-8').decode(opfBytes), 'application/xml');
+
+    var manifest = {};
+    getByLocalName(opfXml, 'item').forEach(function (item) {
+      var href = item.getAttribute('href');
+      try { href = decodeURIComponent(href); } catch (e) {}
+      manifest[item.getAttribute('id')] = href;
+    });
+
+    var spinePaths = [];
+    getByLocalName(opfXml, 'itemref').forEach(function (itemref) {
+      var href = manifest[itemref.getAttribute('idref')];
+      if (!href) return;
+      var path = opfDir ? opfDir + '/' + href : href;
+      spinePaths.push(normalizePath(path));
+    });
+    if (spinePaths.length === 0) throw new Error('Could not find any readable content in this EPUB.');
+
+    var fileTexts = [];
+    var fileHeadingOffsets = [];
+    for (var i = 0; i < spinePaths.length; i++) {
+      var bytes;
+      try {
+        bytes = await zip.readEntry(spinePaths[i]);
+      } catch (err) {
+        continue;
+      }
+      var extracted = extractChapterAwareText(new TextDecoder('utf-8').decode(bytes));
+      if (extracted.text) {
+        fileTexts.push(extracted.text);
+        fileHeadingOffsets.push(extracted.headingOffsets);
+      }
+    }
+    if (fileTexts.length === 0) throw new Error('Could not extract any text from this EPUB.');
+
+    var totalHeadings = fileHeadingOffsets.reduce(function (sum, offs) { return sum + offs.length; }, 0);
+    var pieces = [];
+    if (totalHeadings >= 2) {
+      var isFirstHeadingOverall = true;
+      for (var f = 0; f < fileTexts.length; f++) {
+        var text = fileTexts[f];
+        var offsets = fileHeadingOffsets[f];
+        var cursor = 0;
+        for (var h = 0; h < offsets.length; h++) {
+          var off = offsets[h];
+          if (isFirstHeadingOverall) { isFirstHeadingOverall = false; continue; }
+          pieces.push(text.substring(cursor, off));
+          pieces.push('\f');
+          cursor = off;
+        }
+        pieces.push(text.substring(cursor));
+        pieces.push('\n\n');
+      }
+    } else {
+      for (var j = 0; j < fileTexts.length; j++) {
+        if (j > 0) pieces.push('\f');
+        pieces.push(fileTexts[j]);
+        pieces.push('\n\n');
+      }
+    }
+    return pieces.join('').trim() + '\n';
+  }
+
+  window.epubToTxt = epubToTxt;
+})();
 )rawliteral";
 
 // ---------------- UTIL ----------------
@@ -670,6 +925,10 @@ void handleRoot() {
   server.send(200, "text/html", uploadPage);
 }
 
+void handleEpubToTxtScript() {
+  server.send(200, "application/javascript", epubToTxtScript);
+}
+
 // Hand-built JSON (no ArduinoJson dependency) so the upload page can show
 // the current library without a page reload. bookCount is capped at
 // MAX_BOOKS by listBooks(), so this stays small and fast even though it
@@ -791,6 +1050,7 @@ void handleDeleteBook() {
 // same routes on every visit would leak a RequestHandler node each time.
 void registerWebRoutes() {
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/epub-to-txt.js", HTTP_GET, handleEpubToTxtScript);
   server.on("/books", HTTP_GET, handleBooksList);
   server.on("/delete", HTTP_POST, handleDeleteBook);
   server.on("/upload", HTTP_POST, handleUploadComplete, handleUpload);
