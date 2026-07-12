@@ -432,6 +432,12 @@ String posPath(const String& name) {
   return "/books/" + name + ".pos";
 }
 
+// Filenames always end in ".txt" (see sanitizeFilename()) -- strip it for
+// display purposes so messages read as a title, not a filename.
+String bookTitle(const String& name) {
+  return name.endsWith(".txt") ? name.substring(0, name.length() - 4) : name;
+}
+
 String freeSpaceLabel() {
   size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
   char buf[24];
@@ -640,7 +646,9 @@ void openBook(const String& name) {
   // indexChapters() does a byte-by-byte scan of the whole file, which can take
   // a couple of seconds on a large book -- show a message first so this reads
   // as "working" rather than a frozen screen.
-  showMessage("Opening book...");
+  String title = bookTitle(name);
+  if (title.length() > 18) title = title.substring(0, 15) + "...";  // fit "Opening " + title on one line
+  showMessage("Opening " + title);
 
   currentBookName = name;
   saveCurrentBookName();
