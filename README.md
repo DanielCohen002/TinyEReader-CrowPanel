@@ -4,6 +4,8 @@ A tiny Wi-Fi e-reader firmware for the [Elecrow CrowPanel ESP32 E-Paper HMI 2.13
 
 Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between chapters, and it remembers your place in each book.
 
+**[Flash it from your browser](https://danielcohen002.github.io/TinyEReader-CrowPanel/)** — no Arduino IDE needed, just Chrome or Edge and a USB cable.
+
 ## Features
 
 - Multi-book library: each upload adds a book rather than replacing one, up to 3MB per book
