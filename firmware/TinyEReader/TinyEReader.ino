@@ -215,7 +215,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
 <body>
   <div class="card">
     <h1>PocketReader</h1>
-    <p class="sub">Upload one or more .txt books (up to 3MB each). Open a book from the device's Choose Book screen.</p>
+    <p class="sub">Upload one or more .txt books. Open a book from the device's Choose Book screen.</p>
 
     <form id="form">
       <label class="drop" id="drop" for="file">
