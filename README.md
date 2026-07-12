@@ -63,13 +63,15 @@ Changing the partition table changes where LittleFS's data physically lives on t
 
 Plain `.txt` has no concept of chapters, so the firmware looks for a form-feed byte (`0x0C`, `'\f'`) in the book to mark chapter boundaries — invisible in the rendered text, just a jump point for the dial while reading. A hand-typed `.txt` with no form feeds just has one implicit chapter.
 
-`tools/epub_to_txt.py` converts an EPUB to a `.txt` with these markers already inserted, using the book's real chapter headings (`<h1>`/`<h2>`/`<h3>`) when present, or one marker per internal chapter file as a fallback:
+**Just drop an `.epub` straight onto the upload page** (`http://192.168.4.1`) and it converts automatically, right in the browser, before uploading — no separate tool, no Python. It uses the book's real chapter headings (`<h1>`/`<h2>`/`<h3>`) when present, or one marker per internal chapter file as a fallback, then uploads the resulting `.txt`. This needs a browser with `DecompressionStream` support (recent Chrome, Edge, Firefox, or Safari); the conversion code is `firmware/TinyEReader/TinyEReader.ino`'s `epubToTxtScript`, served at `/epub-to-txt.js`.
+
+There's also a standalone version of the same converter at **[the flash page](https://danielcohen002.github.io/TinyEReader-CrowPanel/epub-to-txt.html)** if you'd rather convert a batch of books ahead of time and keep the `.txt` files around, or two command-line options if you prefer scripting it: `tools/epub_to_txt.py` (Python, no dependencies) --
 
 ```powershell
 py tools\epub_to_txt.py yourbook.epub
 ```
 
-Writes `yourbook.txt` next to it — upload that the normal way. Real-world EPUBs vary a lot in how publishers structure their markup, so double-check the first book you convert; if the chapters land in odd places, note which book and it's worth revisiting the detection heuristic.
+-- writes `yourbook.txt` next to it; upload that the normal way. Real-world EPUBs vary a lot in how publishers structure their markup, so double-check the first book you convert with any of these; if the chapters land in odd places, note which book and it's worth revisiting the detection heuristic (shared between the browser and Python versions, since they use the same logic).
 
 ## Icons and QR codes
 
