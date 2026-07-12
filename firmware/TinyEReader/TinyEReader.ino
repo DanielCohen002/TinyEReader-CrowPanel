@@ -87,8 +87,13 @@ const char* AP_PASS = "12345678";
 // the LittleFS partition is sized at ~6.3MB of the board's 8MB flash.
 constexpr size_t MAX_BOOK_SIZE = 3 * 1024 * 1024;
 constexpr uint32_t SLEEP_AFTER_MS = 60000;
-constexpr uint8_t MAX_BOOKS = 5;  // library list isn't scrollable yet -- keep it to what fits on screen
-                                   // (one row of the Choose Book screen is a free-space header)
+// Book count is bounded by flash space, not an arbitrary limit -- see
+// uploadSizeLimit in handleUpload(). MAX_BOOKS is just the bookList array's
+// capacity (RAM, not flash), sized well past what could realistically fit
+// in the ~6.3MB library partition even with small books. The Choose Book
+// screen only fits CHOOSE_VISIBLE_ROWS at a time and scrolls to show more.
+constexpr uint8_t MAX_BOOKS = 64;
+constexpr uint8_t CHOOSE_VISIBLE_ROWS = 5;  // one row is a free-space header, see renderChooseBook()
 constexpr unsigned long PAGE_REPEAT_DELAY_MS = 500;     // hold Top/Bottom this long to start auto-paging
 constexpr unsigned long PAGE_REPEAT_INTERVAL_MS = 300;  // then advance one page this often while held
 
@@ -121,6 +126,7 @@ String bookList[MAX_BOOKS];
 uint8_t bookCount = 0;
 uint8_t bookFileTotal = 0;  // like bookCount but not capped at MAX_BOOKS -- see listBooks()
 uint8_t chooseSelection = 0;
+uint8_t chooseWindowStart = 0;  // first bookList index shown on screen, see scrollChooseWindow()
 bool confirmDeleteYes = false;  // which option is highlighted in the delete dialog; defaults to No
 
 String currentBookName;  // filename only, e.g. "MyNovel.txt" -- lives under /books/
@@ -234,7 +240,6 @@ const char uploadPage[] PROGMEM = R"rawliteral(
     var filesBox = document.getElementById('files');
     var form = document.getElementById('form');
     var picked = [];
-    var libraryFull = false;
 
     function fmtSize(n) {
       if (n > 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + 'MB';
@@ -244,7 +249,7 @@ const char uploadPage[] PROGMEM = R"rawliteral(
 
     function refreshLibrary() {
       fetch('/books').then(function (r) { return r.json(); }).then(function (data) {
-        var meta = data.count + ' of ' + data.max + ' books - ' + data.free;
+        var meta = data.count + ' book' + (data.count === 1 ? '' : 's') + ' - ' + data.free;
         if (data.hidden > 0) {
           meta += ' (+' + data.hidden + ' more on the device you can\'t see or delete here - ' +
             'delete a visible book to make room, which will reveal one of them)';
@@ -269,11 +274,6 @@ const char uploadPage[] PROGMEM = R"rawliteral(
           li.appendChild(size);
           list.appendChild(li);
         });
-        libraryFull = data.count >= data.max;
-        go.disabled = picked.length === 0 || libraryFull;
-        if (libraryFull && picked.length === 0) {
-          dropLabel.textContent = 'Library full - delete a book on the device first';
-        }
       }).catch(function () {
         document.getElementById('libMeta').textContent = '';
       });
@@ -283,12 +283,10 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       picked = Array.prototype.filter.call(fileList, function (f) {
         return f.name.toLowerCase().endsWith('.txt');
       });
-      if (picked.length === 0) {
-        dropLabel.textContent = libraryFull ? 'Library full - delete a book on the device first' : 'Tap to choose books';
-      } else {
-        dropLabel.textContent = picked.length + ' book' + (picked.length > 1 ? 's' : '') + ' selected';
-      }
-      go.disabled = picked.length === 0 || libraryFull;
+      dropLabel.textContent = picked.length === 0
+        ? 'Tap to choose books'
+        : picked.length + ' book' + (picked.length > 1 ? 's' : '') + ' selected';
+      go.disabled = picked.length === 0;
       filesBox.innerHTML = '';
     }
 
@@ -511,6 +509,7 @@ void listBooks() {
 }
 
 void renderChooseBook();
+void scrollChooseWindow();
 
 void deleteSelectedBook() {
   if (bookCount == 0) return;
@@ -531,6 +530,7 @@ void deleteSelectedBook() {
   } else if (chooseSelection >= bookCount) {
     chooseSelection = bookCount - 1;
   }
+  scrollChooseWindow();
   renderChooseBook();
 }
 
@@ -621,7 +621,6 @@ void handleBooksList() {
     json += "{\"name\":\"" + bookList[i] + "\",\"size\":" + String(size) + "}";
   }
   json += "],\"count\":" + String(bookCount) +
-          ",\"max\":" + String(MAX_BOOKS) +
           ",\"hidden\":" + String(bookFileTotal > bookCount ? bookFileTotal - bookCount : 0) +
           ",\"free\":\"" + freeSpaceLabel() + "\"}";
 
@@ -657,18 +656,6 @@ void handleUpload() {
 
     if (!LittleFS.exists("/books")) LittleFS.mkdir("/books");
 
-    // Reject once the library is at MAX_BOOKS, unless this upload is
-    // replacing an existing book by the same name -- otherwise the file
-    // still gets written to flash but never shows up anywhere (listBooks()
-    // stops filling bookList at MAX_BOOKS), silently eating free space with
-    // no way to see or delete it from the device or the web UI.
-    listBooks();
-    bool replacingExisting = LittleFS.exists(bookPath(uploadName));
-    if (bookCount >= MAX_BOOKS && !replacingExisting) {
-      tooLarge = true;
-      return;
-    }
-
     size_t freeSpace = LittleFS.totalBytes() - LittleFS.usedBytes();
     uploadSizeLimit = min((size_t)MAX_BOOK_SIZE, freeSpace > 8192 ? freeSpace - 8192 : 0);
     if (uploadSizeLimit == 0) {
@@ -702,7 +689,7 @@ void handleUpload() {
 // headers (ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_LENGTH in Chrome).
 void handleUploadComplete() {
   if (tooLarge) {
-    server.send(413, "text/plain", "File too large or library full (limit 3MB per book)");
+    server.send(413, "text/plain", "File too large (limit 3MB per book, or not enough free space)");
     return;
   }
 
@@ -1010,23 +997,45 @@ void renderHome() {
   endFrame();
 }
 
-// Row 0 is a free-space header; the book list starts one row down. Dial
-// press opens the highlighted book; dial down opens a Yes/No delete
-// confirmation for it instead (see renderConfirmDelete/enterConfirmDelete).
+// Keeps chooseSelection inside [chooseWindowStart, chooseWindowStart +
+// CHOOSE_VISIBLE_ROWS) by scrolling the window the minimum amount needed --
+// called whenever chooseSelection or bookCount changes.
+void scrollChooseWindow() {
+  if (chooseSelection < chooseWindowStart) {
+    chooseWindowStart = chooseSelection;
+  } else if (chooseSelection >= chooseWindowStart + CHOOSE_VISIBLE_ROWS) {
+    chooseWindowStart = chooseSelection - CHOOSE_VISIBLE_ROWS + 1;
+  }
+  uint8_t maxStart = (bookCount > CHOOSE_VISIBLE_ROWS) ? bookCount - CHOOSE_VISIBLE_ROWS : 0;
+  if (chooseWindowStart > maxStart) chooseWindowStart = maxStart;
+}
+
+// Row 0 is a free-space header (plus ^/v hints when the list scrolls); the
+// book list starts one row down and shows at most CHOOSE_VISIBLE_ROWS at a
+// time. Dial press opens the highlighted book; dial down opens a Yes/No
+// delete confirmation for it instead (see renderConfirmDelete/enterConfirmDelete).
 void renderChooseBook() {
   beginFrame();
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, freeSpaceLabel().c_str(), BLACK, MENU_FONT);
+  String header = freeSpaceLabel();
+  if (bookCount > CHOOSE_VISIBLE_ROWS) {
+    header += "  ";
+    header += (chooseWindowStart > 0) ? "^" : " ";
+    header += (chooseWindowStart + CHOOSE_VISIBLE_ROWS < bookCount) ? "v" : " ";
+  }
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, header.c_str(), BLACK, MENU_FONT);
 
   if (bookCount == 0) {
     EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, "No books yet.", BLACK, MENU_FONT);
     EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, "Upload one first.", BLACK, MENU_FONT);
   } else {
-    for (uint8_t i = 0; i < bookCount; i++) {
+    uint8_t windowEnd = min((uint8_t)(chooseWindowStart + CHOOSE_VISIBLE_ROWS), bookCount);
+    for (uint8_t i = chooseWindowStart; i < windowEnd; i++) {
+      uint8_t row = i - chooseWindowStart;
       String label = (i == chooseSelection) ? "> " : "  ";
       String name = bookList[i];
       if (name.length() > 26) name = name.substring(0, 23) + "...";
       label += name;
-      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (i + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (row + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
     }
   }
   endFrame();
@@ -1108,6 +1117,7 @@ void selectHomeItem() {
     case 1:  // Choose Book
       listBooks();
       chooseSelection = 0;
+      chooseWindowStart = 0;
       currentScreen = SCREEN_CHOOSE_BOOK;
       renderChooseBook();
       break;
@@ -1193,10 +1203,12 @@ void handleButtons() {
       if (bookCount > 0) {
         if (dialUpTapped) {
           chooseSelection = (chooseSelection + bookCount - 1) % bookCount;
+          scrollChooseWindow();
           renderChooseBook();
         }
         if (dialDownTapped) {
           chooseSelection = (chooseSelection + 1) % bookCount;
+          scrollChooseWindow();
           renderChooseBook();
         }
         if (dialPressTapped) openBook(bookList[chooseSelection]);
