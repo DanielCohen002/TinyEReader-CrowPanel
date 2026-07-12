@@ -119,6 +119,7 @@ uint8_t homeSelection = 0;
 
 String bookList[MAX_BOOKS];
 uint8_t bookCount = 0;
+uint8_t bookFileTotal = 0;  // like bookCount but not capped at MAX_BOOKS -- see listBooks()
 uint8_t chooseSelection = 0;
 bool confirmDeleteYes = false;  // which option is highlighted in the delete dialog; defaults to No
 
@@ -243,8 +244,12 @@ const char uploadPage[] PROGMEM = R"rawliteral(
 
     function refreshLibrary() {
       fetch('/books').then(function (r) { return r.json(); }).then(function (data) {
-        document.getElementById('libMeta').textContent =
-          data.count + ' of ' + data.max + ' books - ' + data.free;
+        var meta = data.count + ' of ' + data.max + ' books - ' + data.free;
+        if (data.hidden > 0) {
+          meta += ' (+' + data.hidden + ' more on the device you can\'t see or delete here - ' +
+            'delete a visible book to make room, which will reveal one of them)';
+        }
+        document.getElementById('libMeta').textContent = meta;
         var list = document.getElementById('libList');
         list.innerHTML = '';
         if (data.books.length === 0) {
@@ -484,16 +489,22 @@ void reopenBookAt(uint32_t offset) {
 
 void listBooks() {
   bookCount = 0;
+  bookFileTotal = 0;
   File dir = LittleFS.open("/books");
   if (!dir || !dir.isDirectory()) return;
 
+  // Keeps counting past MAX_BOOKS (into bookFileTotal) even once bookList is
+  // full, so leftover books from before upload enforced the MAX_BOOKS cap --
+  // invisible here and in the web library list, but still eating flash
+  // space -- can be surfaced instead of silently vanishing.
   File f = dir.openNextFile();
-  while (f && bookCount < MAX_BOOKS) {
+  while (f) {
     String name = String(f.name());
     int slash = name.lastIndexOf('/');
     if (slash != -1) name = name.substring(slash + 1);
     if (name.length() > 0 && !name.endsWith(".pos")) {
-      bookList[bookCount++] = name;
+      if (bookCount < MAX_BOOKS) bookList[bookCount++] = name;
+      bookFileTotal++;
     }
     f = dir.openNextFile();
   }
@@ -611,6 +622,7 @@ void handleBooksList() {
   }
   json += "],\"count\":" + String(bookCount) +
           ",\"max\":" + String(MAX_BOOKS) +
+          ",\"hidden\":" + String(bookFileTotal > bookCount ? bookFileTotal - bookCount : 0) +
           ",\"free\":\"" + freeSpaceLabel() + "\"}";
 
   server.send(200, "application/json", json);
@@ -644,6 +656,18 @@ void handleUpload() {
     uploadName = sanitizeFilename(upload.filename);
 
     if (!LittleFS.exists("/books")) LittleFS.mkdir("/books");
+
+    // Reject once the library is at MAX_BOOKS, unless this upload is
+    // replacing an existing book by the same name -- otherwise the file
+    // still gets written to flash but never shows up anywhere (listBooks()
+    // stops filling bookList at MAX_BOOKS), silently eating free space with
+    // no way to see or delete it from the device or the web UI.
+    listBooks();
+    bool replacingExisting = LittleFS.exists(bookPath(uploadName));
+    if (bookCount >= MAX_BOOKS && !replacingExisting) {
+      tooLarge = true;
+      return;
+    }
 
     size_t freeSpace = LittleFS.totalBytes() - LittleFS.usedBytes();
     uploadSizeLimit = min((size_t)MAX_BOOK_SIZE, freeSpace > 8192 ? freeSpace - 8192 : 0);
