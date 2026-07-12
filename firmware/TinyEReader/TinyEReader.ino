@@ -302,37 +302,42 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       setPicked(e.dataTransfer.files);
     });
 
+    function addFileRow(file) {
+      var row = document.createElement('div');
+      row.className = 'file-row';
+      var name = document.createElement('span');
+      name.textContent = file.name;
+      var status = document.createElement('span');
+      status.className = 'status';
+      row.appendChild(name);
+      row.appendChild(status);
+      filesBox.appendChild(row);
+      return { row: row, status: status };
+    }
+
     function uploadOne(file) {
       return new Promise(function (resolve) {
-        var row = document.createElement('div');
-        row.className = 'file-row';
-        var name = document.createElement('span');
-        name.textContent = file.name;
-        var status = document.createElement('span');
-        status.className = 'status';
-        status.textContent = '0%';
-        row.appendChild(name);
-        row.appendChild(status);
-        filesBox.appendChild(row);
+        var r = addFileRow(file);
+        r.status.textContent = '0%';
 
         var xhr = new XMLHttpRequest();
         xhr.open('POST', '/upload');
         xhr.upload.onprogress = function (e) {
-          if (e.lengthComputable) status.textContent = Math.round((e.loaded / e.total) * 100) + '%';
+          if (e.lengthComputable) r.status.textContent = Math.round((e.loaded / e.total) * 100) + '%';
         };
         xhr.onload = function () {
           if (xhr.status === 200) {
-            row.classList.add('done');
-            status.textContent = 'Done';
+            r.row.classList.add('done');
+            r.status.textContent = 'Done';
           } else {
-            row.classList.add('error');
-            status.textContent = xhr.status === 413 ? 'Too large' : 'Failed';
+            r.row.classList.add('error');
+            r.status.textContent = xhr.status === 413 ? 'Too large' : 'Failed';
           }
           resolve();
         };
         xhr.onerror = function () {
-          row.classList.add('error');
-          status.textContent = 'Failed';
+          r.row.classList.add('error');
+          r.status.textContent = 'Failed';
           resolve();
         };
         var data = new FormData();
@@ -341,16 +346,40 @@ const char uploadPage[] PROGMEM = R"rawliteral(
       });
     }
 
+    // Mirrors handleUpload()'s own acceptance check (min(maxSize, freeBytes -
+    // 8192), freeBytes shrinking as earlier books in the queue are counted)
+    // so books that can't possibly fit are rejected up front instead of
+    // failing partway through a batch after using up real upload time.
+    function planQueue(files, freeBytes, maxSize) {
+      var available = freeBytes;
+      return files.map(function (file) {
+        var allowed = available > 8192 ? Math.min(maxSize, available - 8192) : 0;
+        var fits = file.size <= allowed;
+        if (fits) available -= file.size;
+        return fits;
+      });
+    }
+
     form.addEventListener('submit', function (e) {
       e.preventDefault();
       if (picked.length === 0) return;
       go.disabled = true;
       filesBox.innerHTML = '';
-      var chain = Promise.resolve();
-      picked.forEach(function (file) {
-        chain = chain.then(function () { return uploadOne(file); });
-      });
-      chain.then(function () {
+
+      fetch('/books').then(function (r) { return r.json(); }).then(function (data) {
+        var fits = planQueue(picked, data.freeBytes, data.maxSize);
+        var chain = Promise.resolve();
+        picked.forEach(function (file, i) {
+          if (fits[i]) {
+            chain = chain.then(function () { return uploadOne(file); });
+          } else {
+            var r = addFileRow(file);
+            r.row.classList.add('error');
+            r.status.textContent = "Won't fit - skipped";
+          }
+        });
+        return chain;
+      }).then(function () {
         picked = [];
         fileInput.value = '';
         dropLabel.textContent = 'Tap to choose books';
@@ -620,9 +649,16 @@ void handleBooksList() {
     if (f) f.close();
     json += "{\"name\":\"" + bookList[i] + "\",\"size\":" + String(size) + "}";
   }
+  // freeBytes/maxSize let the upload page simulate handleUpload()'s own
+  // acceptance math (min(MAX_BOOK_SIZE, freeSpace - 8192)) client-side, so
+  // it can reject queued books that won't fit before even starting the
+  // upload instead of finding out partway through a batch.
+  size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
   json += "],\"count\":" + String(bookCount) +
           ",\"hidden\":" + String(bookFileTotal > bookCount ? bookFileTotal - bookCount : 0) +
-          ",\"free\":\"" + freeSpaceLabel() + "\"}";
+          ",\"free\":\"" + freeSpaceLabel() + "\"" +
+          ",\"freeBytes\":" + String(freeBytes) +
+          ",\"maxSize\":" + String(MAX_BOOK_SIZE) + "}";
 
   server.send(200, "application/json", json);
 }
