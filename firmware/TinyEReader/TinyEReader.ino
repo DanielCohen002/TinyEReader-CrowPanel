@@ -32,9 +32,13 @@
     Settings) -- 5 items, shown 3 at a time as two pages (dial past the 3rd
     item to reach the other 2), see HOME_ITEM_COUNT below
   - Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn,
-    invert display, book sort order, reading-progress indicator, and factory
-    reset -- all persisted with the ESP32's own Preferences/NVS storage, not
-    LittleFS
+    invert display, book sort order, reading-progress indicator, text size,
+    and factory reset -- all persisted with the ESP32's own Preferences/NVS
+    storage, not LittleFS
+  - Text size: 4 steps (Small/Medium/Large/X-Large, 12/16/24/32px), reflowing
+    the whole book to the new width/line count from wherever you are --
+    everything that depends on layout (page-fraction tracking, the "page up"
+    replay cache) re-derives itself from the new size, see applyBookFont()
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after
     inactivity, wakes instantly on any button press. Optionally (off by
     default), if it's still untouched for a further stretch, drops into a
@@ -158,17 +162,34 @@ constexpr uint8_t MAX_BOOKS = 64;
 constexpr uint8_t CHOOSE_VISIBLE_ROWS = 5;  // one row is a free-space header, see renderChooseBook()
 constexpr unsigned long BOOKMARK_HOLD_MS = 600;  // hold Top this long while reading to save a bookmark
 
-// Book text layout (8x16 font). 6 lines is the max that fits at all: the
-// 12x24 font this used to be set to is exactly 24px tall, and 6 * 24 = 144
-// is taller than the 122px screen -- there's no way to fit 6 lines of that
-// size without rows overlapping. 16px is the next font size down.
+// Book text layout. Font size is a Settings-screen option (Text size, see
+// cycleTextSize()/TEXT_SIZE_PRESETS_PX below) -- bookFont and everything
+// derived from it (bookCharWidth/bookLineHeight/bookCharsPerLine/
+// bookMaxLines) are runtime variables, not compile-time constants, kept in
+// sync by applyBookFont() below. Only BOOK_LEFT_MARGIN/BOOK_TOP_MARGIN are
+// unaffected by font size and stay as constexpr.
+//
+// All 5 baked-in bitmap fonts (EPD_ShowChar/EPDfont.h) are fixed-width with
+// glyph width = height/2, so every derived value below is a pure function
+// of bookFont -- the same formulas reproduce today's 16px numbers (8/20/
+// 30/6) exactly, which is a good sanity check they're right. 48px isn't
+// offered: at that size a "page" is only 2 lines of ~10 characters, too
+// choppy to read continuously.
 constexpr uint16_t BOOK_LEFT_MARGIN = 4;
 constexpr uint16_t BOOK_TOP_MARGIN = 1;
-constexpr uint16_t BOOK_LINE_HEIGHT = 20;
-constexpr uint8_t BOOK_FONT = 16;
-constexpr uint8_t BOOK_CHAR_WIDTH = 8;  // fixed glyph width in px at BOOK_FONT -- matches BOOK_CHARS_PER_LINE's own math
-constexpr uint8_t BOOK_CHARS_PER_LINE = 30;
-constexpr uint8_t BOOK_MAX_LINES = 6;
+// Upper bound on lines-per-page across every offered font size (7, at the
+// smallest/12px preset) -- used only to size the `lines[]` stack array in
+// renderPageAtCore(), since that needs a compile-time length. The actual
+// per-frame line count is always the runtime bookMaxLines, which never
+// exceeds this.
+constexpr uint8_t BOOK_MAX_LINES_CAP = 8;
+const uint32_t TEXT_SIZE_PRESETS_PX[] = { 12, 16, 24, 32 };
+constexpr uint8_t TEXT_SIZE_PRESETS_COUNT = 4;
+uint8_t bookFont = 16;
+uint8_t bookCharWidth = 8;
+uint16_t bookLineHeight = 20;
+uint8_t bookCharsPerLine = 30;
+uint8_t bookMaxLines = 6;
 
 // Menu screen layout (8x16 font -- smaller, so list items/labels fit comfortably).
 constexpr uint16_t MENU_LEFT_MARGIN = 6;
@@ -227,11 +248,11 @@ uint32_t bookmarkSlotPages[BOOKMARK_SLOT_COUNT];
 // for the save.
 Preferences prefs;
 // 0 = sleep timeout, 1 = deep sleep timeout, 2 = auto page turn,
-// 3 = invert display, 4 = book sort, 5 = progress indicator,
-// 6 = factory reset. More items than fit on screen at once now, so this
+// 3 = invert display, 4 = book sort, 5 = progress indicator, 6 = text size,
+// 7 = factory reset. More items than fit on screen at once now, so this
 // scrolls the same way Choose Book does -- see
 // SETTINGS_VISIBLE_ROWS/settingsWindowStart/scrollSettingsWindow().
-constexpr uint8_t SETTINGS_ITEM_COUNT = 7;
+constexpr uint8_t SETTINGS_ITEM_COUNT = 8;
 constexpr uint8_t SETTINGS_VISIBLE_ROWS = 5;
 uint8_t settingsSelection = 0;
 uint8_t settingsWindowStart = 0;
@@ -1363,7 +1384,7 @@ String utf8ToAsciiReplacement(uint8_t leadByte) {
 }
 
 // Greedy word-wrap: build the line word by word and stop before a word that
-// would overflow BOOK_CHARS_PER_LINE, instead of cutting mid-word. If a word
+// would overflow bookCharsPerLine, instead of cutting mid-word. If a word
 // won't fit, seek back to its start so it becomes the start of the next line.
 //
 // Newline handling: a lone '\n' is treated as just another word separator,
@@ -1429,7 +1450,7 @@ String readWrappedLine(bool* hitChapterBreak = nullptr) {
       // our delimiters) is dropped silently.
     }
 
-    if (word.length() > BOOK_CHARS_PER_LINE) {
+    if (word.length() > bookCharsPerLine) {
       // Single word longer than a whole line (long URL, etc): hard-break it
       // rather than looping forever. Flush whatever we already have first so
       // the long word starts cleanly on its own line.
@@ -1437,12 +1458,12 @@ String readWrappedLine(bool* hitChapterBreak = nullptr) {
         book.seek(wordStart);
         break;
       }
-      book.seek(wordStart + BOOK_CHARS_PER_LINE);
-      return word.substring(0, BOOK_CHARS_PER_LINE);
+      book.seek(wordStart + bookCharsPerLine);
+      return word.substring(0, bookCharsPerLine);
     }
 
     uint16_t candidateLen = line.length() + (line.length() > 0 ? 1 : 0) + word.length();
-    if (candidateLen > BOOK_CHARS_PER_LINE) {
+    if (candidateLen > bookCharsPerLine) {
       book.seek(wordStart);
       break;
     }
@@ -1455,7 +1476,7 @@ String readWrappedLine(bool* hitChapterBreak = nullptr) {
 }
 
 // Wraps text starting at `offset` (assumes `book` is already open on the
-// current book) into up to BOOK_MAX_LINES lines and returns where the
+// current book) into up to bookMaxLines lines and returns where the
 // resulting page ends. Shared by the real render path and by
 // findPreviousPageStart()'s forward-replay simulation below -- both need to
 // agree exactly on where pages break, or "page up" could land somewhere
@@ -1466,7 +1487,7 @@ uint32_t computePageEnd(uint32_t offset, String* outLines, uint8_t* outLineCount
   book.seek(offset);
 
   uint8_t lineCount = 0;
-  while (book.available() && lineCount < BOOK_MAX_LINES) {
+  while (book.available() && lineCount < bookMaxLines) {
     bool hitChapterBreak = false;
     String line = readWrappedLine(&hitChapterBreak);
     if (outLines) outLines[lineCount] = line;
@@ -1612,13 +1633,13 @@ String progressIndicatorText(uint32_t offset) {
 // 1-2px progress bar hugging the very bottom edge of the screen, filled
 // proportionally to how far `offset` is through the file -- independent of
 // how many lines this particular page has, so it stays in a fixed spot.
-// BOOK_MAX_LINES already uses the screen down to its last pixel of slack
-// (see the comment there), but the glyphs themselves are BOOK_FONT (16px)
-// tall against a BOOK_LINE_HEIGHT of 20px, so the last text row's own
-// glyphs end a few px above the bottom edge -- plenty of room for this
-// without eating a line. Only drawn for progressMode == PROGRESS_BAR (see
-// call site in renderPageAtCore()) -- mutually exclusive with the corner
-// text modes, not layered with them.
+// bookMaxLines already uses the screen down to its last pixel of slack (see
+// applyBookFont()), but the glyphs themselves (bookFont px tall, against a
+// taller bookLineHeight) always end a few px above the bottom edge --
+// plenty of room for this without eating a line, at any offered font size.
+// Only drawn for progressMode == PROGRESS_BAR (see call site in
+// renderPageAtCore()) -- mutually exclusive with the corner text modes, not
+// layered with them.
 constexpr uint16_t PROGRESS_BAR_THICKNESS = 2;
 void drawProgressBar(uint32_t offset, size_t size) {
   if (size == 0) return;
@@ -1641,7 +1662,7 @@ void renderPageAtCore(uint32_t offset) {
     return;
   }
 
-  String lines[BOOK_MAX_LINES];
+  String lines[BOOK_MAX_LINES_CAP];
   uint8_t lineCount = 0;
   pageEnd = computePageEnd(offset, lines, &lineCount);
 
@@ -1652,11 +1673,11 @@ void renderPageAtCore(uint32_t offset) {
   // any.
   String indicator = (lineCount > 0) ? progressIndicatorText(offset) : "";
   if (indicator.length() > 0) {
-    constexpr uint16_t INDICATOR_GAP = BOOK_CHAR_WIDTH;
-    uint16_t indicatorWidth = indicator.length() * BOOK_CHAR_WIDTH;
+    uint16_t INDICATOR_GAP = bookCharWidth;
+    uint16_t indicatorWidth = indicator.length() * bookCharWidth;
     uint16_t usableWidth = EPD_W - 2 * BOOK_LEFT_MARGIN;
     String& lastLine = lines[lineCount - 1];
-    while (lastLine.length() * BOOK_CHAR_WIDTH + INDICATOR_GAP + indicatorWidth > usableWidth) {
+    while (lastLine.length() * bookCharWidth + INDICATOR_GAP + indicatorWidth > usableWidth) {
       int lastSpace = lastLine.lastIndexOf(' ');
       if (lastSpace < 0) {
         lastLine = "";
@@ -1669,13 +1690,13 @@ void renderPageAtCore(uint32_t offset) {
   beginFrame();
 
   for (uint8_t i = 0; i < lineCount; i++) {
-    EPD_ShowString(BOOK_LEFT_MARGIN, BOOK_TOP_MARGIN + (i * BOOK_LINE_HEIGHT), lines[i].c_str(), BLACK, BOOK_FONT);
+    EPD_ShowString(BOOK_LEFT_MARGIN, BOOK_TOP_MARGIN + (i * bookLineHeight), lines[i].c_str(), BLACK, bookFont);
   }
 
   if (indicator.length() > 0) {
-    uint16_t indicatorX = EPD_W - BOOK_LEFT_MARGIN - (uint16_t)(indicator.length() * BOOK_CHAR_WIDTH);
-    uint16_t indicatorY = BOOK_TOP_MARGIN + (lineCount - 1) * BOOK_LINE_HEIGHT;
-    EPD_ShowString(indicatorX, indicatorY, indicator.c_str(), BLACK, BOOK_FONT);
+    uint16_t indicatorX = EPD_W - BOOK_LEFT_MARGIN - (uint16_t)(indicator.length() * bookCharWidth);
+    uint16_t indicatorY = BOOK_TOP_MARGIN + (lineCount - 1) * bookLineHeight;
+    EPD_ShowString(indicatorX, indicatorY, indicator.c_str(), BLACK, bookFont);
   }
   if (progressMode == PROGRESS_BAR) drawProgressBar(offset, fileSize);
 
@@ -1998,6 +2019,17 @@ String progressModeLabel(ProgressMode mode) {
   }
 }
 
+// Named labels for TEXT_SIZE_PRESETS_PX rather than just printing the raw
+// pixel height, same reasoning as sortModeLabel()/progressModeLabel().
+String textSizeLabel(uint8_t font) {
+  switch (font) {
+    case 12: return "Small";
+    case 24: return "Large";
+    case 32: return "X-Large";
+    default: return "Medium";
+  }
+}
+
 // Label for settings row `index` (0..SETTINGS_ITEM_COUNT-1), without the
 // "> "/"  " selection prefix -- see renderSettings().
 String settingsItemLabel(uint8_t index) {
@@ -2008,6 +2040,7 @@ String settingsItemLabel(uint8_t index) {
     case 3: return "Invert: " + String(invertDisplay ? "On" : "Off");
     case 4: return "Sort: " + sortModeLabel(sortMode);
     case 5: return "Progress: " + progressModeLabel(progressMode);
+    case 6: return "Text size: " + textSizeLabel(bookFont);
     default: return "Factory reset";
   }
 }
@@ -2025,9 +2058,11 @@ void scrollSettingsWindow() {
 }
 
 // 6 rows is the max that fits this screen (MENU_TOP_MARGIN=4, MENU_LINE_HEIGHT=20,
-// 122px tall -- same limit as BOOK_MAX_LINES's math): header + up to
-// SETTINGS_VISIBLE_ROWS items, scrolling for the rest (same ^/v hint
-// convention as renderChooseBook()) now that there are more items than fit
+// 122px tall -- the menu screens use a fixed font/line height, unlike the
+// reading screen's bookLineHeight, which is why this number doesn't move
+// when Text size changes): header + up to SETTINGS_VISIBLE_ROWS items,
+// scrolling for the rest (same ^/v hint convention as renderChooseBook())
+// now that there are more items than fit
 // at once.
 void renderSettings() {
   beginFrame();
@@ -2120,6 +2155,41 @@ void cycleProgressMode() {
   // refreshPageTracking()) -- otherwise switching away from Fraction and
   // back later would show whatever currentPageNumber/totalPageCount were
   // last left at, possibly for a page you've since turned away from.
+  refreshPageTracking(pageStart);
+  renderSettings();
+}
+
+// Derives bookCharWidth/bookLineHeight/bookCharsPerLine/bookMaxLines from
+// `font` -- every offered font is fixed-width with glyph width = height/2
+// (see EPD_ShowChar), so these are pure formulas, not a lookup table; at
+// font=16 they reproduce today's original numbers (8/20/30/6) exactly.
+// +4px of line spacing above the glyph height, matching the original
+// 16-on-20 ratio. -2px of width slack is intentional, same as the original
+// 30*8=240-vs-242-usable gap -- flooring division already gets us there.
+//
+// Also invalidates the "page up" replay cache (cachedChapterStart/
+// cachedPageCount): those cache old page *boundaries*, which depend on the
+// layout that produced them. Left alone, a font change wouldn't reliably
+// bust the cache on its own -- cacheCoversTarget in findPreviousPageStart()
+// only compares chapter start offsets, which don't change with font size,
+// so a stale cache from the old layout could otherwise get reused and
+// "page up" would land somewhere that doesn't match what's now on screen.
+void applyBookFont(uint8_t font) {
+  bookFont = font;
+  bookCharWidth = font / 2;
+  bookLineHeight = font + 4;
+  bookCharsPerLine = (EPD_W - 2 * BOOK_LEFT_MARGIN) / bookCharWidth;
+  bookMaxLines = EPD_H / bookLineHeight;
+  cachedChapterStart = 0xFFFFFFFF;
+  cachedPageCount = 0;
+}
+
+void cycleTextSize() {
+  uint32_t next = nextPreset(TEXT_SIZE_PRESETS_PX, TEXT_SIZE_PRESETS_COUNT, bookFont);
+  applyBookFont((uint8_t)next);
+  prefs.putUChar("bookFont", bookFont);
+  // Page boundaries just shifted, so re-sweep for Fraction mode the same
+  // way cycleProgressMode() does -- a no-op unless that's the active mode.
   refreshPageTracking(pageStart);
   renderSettings();
 }
@@ -2311,6 +2381,7 @@ void handleButtons() {
           case 3: toggleInvertDisplay(); break;
           case 4: cycleSortMode(); break;
           case 5: cycleProgressMode(); break;
+          case 6: cycleTextSize(); break;
           default: enterConfirm(CONFIRM_FACTORY_RESET); break;
         }
       }
@@ -2439,6 +2510,7 @@ void setup() {
   invertDisplay = prefs.getBool("invert", false);
   sortMode = (SortMode)prefs.getUChar("sortMode", SORT_AZ);
   progressMode = (ProgressMode)prefs.getUChar("progressMode", PROGRESS_PERCENT);
+  applyBookFont(prefs.getUChar("bookFont", 16));
 
   if (!LittleFS.begin(true)) {
     showMessage("LittleFS failed");
