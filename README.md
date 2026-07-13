@@ -16,9 +16,9 @@ Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between ch
 - Drop an `.epub` straight onto the upload page and it's converted to `.txt` automatically, right in the browser
 - Reading progress indicator, one of four: percentage, page fraction, a thin bottom bar, or off. Percent/Fraction are tacked onto the end of the last line of text rather than their own row — the line trims back a whole word at a time to make genuine room when needed, rather than drawing over whatever was already there — so none of the four costs a line of reading space
 - Optional auto page turn (off by default) — reading becomes hands-free at a configurable interval
-- Home menu: 6 icons (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi / Settings / Help) shown 3 at a time across two pages, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
-- Help screen: a scrollable reference for every button/dial action, grouped by what they do while reading vs. everywhere else
-- Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn interval, invert display, book sort order, the progress indicator's format, text size, and factory reset — see [Settings](#settings) below
+- Home menu: 5 icons (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi / Settings) shown 3 at a time across two pages, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
+- Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn interval, invert display, book sort order, the progress indicator's format, text size, a controls reference, and factory reset — see [Settings](#settings) below
+- Controls reference (in Settings): a scrollable list of what every button/dial does, grouped by what they do while reading vs. everywhere else
 - Choose Book and the Bookmarks screen's book picker can sort A-Z, Z-A, or by file size
 - Delete a book from Choose Book, or a bookmark from the Bookmarks screen, via the same Yes/No confirmation dialog
 - Two QR codes on the Connect to Wi-Fi screen — one auto-joins the `PocketReader` network, one links out to the project — generated from PNGs with `tools/image_to_epd.py`
@@ -49,12 +49,12 @@ Button meaning depends on which screen is showing:
 | | Top | Bottom | Dial rotate | Dial press |
 | --- | --- | --- | --- | --- |
 | Reading a book | Tap = previous page, hold = save/overwrite a bookmark (see [Bookmarks](#bookmarks)) | Next page | Up = previous chapter, down = next chapter — hold either to keep skipping instead of tapping repeatedly | Open Home menu |
-| Home / Choose Book / Bookmarks / Settings / Help / confirm dialog | Jump to Home (cancels the confirm dialog without acting) | On a book in Choose Book, or a bookmark in the Bookmarks screen, opens the delete confirmation | Move selection up/down (scrolls the Help screen instead, which has nothing to select) | Select highlighted item (also just returns Home from Help) |
+| Home / Choose Book / Bookmarks / Settings / Controls / confirm dialog | Jump to Home (cancels the confirm dialog without acting) | On a book in Choose Book, or a bookmark in the Bookmarks screen, opens the delete confirmation | Move selection up/down (scrolls the Controls screen instead, which has nothing to select) | Select highlighted item (also just returns Home from Controls) |
 | Connect to Wi-Fi | Back to Home | — | — | Back to Home |
 
-This same table, plus which screens count as "reading" vs. "everywhere else," is also on the device itself — the **Help** icon on Home.
+This same table, plus which screens count as "reading" vs. "everywhere else," is also on the device itself — **Settings -> Controls**.
 
-Home no longer fits all 6 items in one row at the icon size used, so it's paged: dial past the 3rd item (Bookmarks) to reach the other 3 (Connect to Wi-Fi / Settings / Help), same dial up/down as everywhere else.
+Home no longer fits all 5 items in one row at the icon size used, so it's paged: dial past the 3rd item (Bookmarks) to reach the other 2 (Connect to Wi-Fi / Settings), same dial up/down as everywhere else.
 
 ## Display driver
 
@@ -101,6 +101,7 @@ Open the **Settings** icon from Home (it's on the second Home page -- see [Butto
 - **Sort** -- cycles A-Z / Z-A / Size (largest first). Applies everywhere the library is listed: Choose Book, the Bookmarks screen's book picker, and the web upload page's library view, since they all go through the same `listBooks()`.
 - **Progress** -- cycles Percent / Fraction / Bar / Off. One at a time, not layered -- Bar shows the thin bottom bar instead of corner text, Off shows neither. Fraction shows the current chapter out of the book's total chapter count, not a page count -- see [Reading progress](#reading-progress) below for why.
 - **Text size** -- cycles Small / Medium / Large / X-Large (12/16/24/32px). Medium is the original size and still the default. Changing it re-paginates the book you're currently reading from wherever you are, so the same byte position just reflows into more or fewer, longer or shorter lines -- no lost place, but page numbers and the "page up" history for the current chapter both recompute against the new layout, so don't expect the *page count* to mean the same thing across a size change, only the reading position itself.
+- **Controls** -- not a setting to change, just opens a scrollable reference screen listing what every button/dial does, split into "in reader" vs. "in menus" (see the [button table](#hardware) above). Dial up/down scrolls it; Top or dial press both just return to Home, since there's nothing on this screen to select.
 - **Factory reset** -- wipes every book, reading position, and bookmark on the device, plus every setting on this screen, then reboots. Same Yes/No confirmation as deleting a book; there's no undo.
 
 That's 6 options plus the header -- one more than fits in a single screen at this font size, so this screen scrolls now (same up/down-past-the-edge behavior as Choose Book), rather than trying to cram everything in or drop something else to make room.

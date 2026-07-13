@@ -29,15 +29,16 @@
     Gutenberg-style, one fixed-width source line per line) reflow to this
     screen's width instead of leaving a gap at every source line boundary
   - Home menu (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi /
-    Settings / Help) -- 6 items, shown 3 at a time as two pages (dial past
-    the 3rd item to reach the other 3), see HOME_ITEM_COUNT below
-  - Help screen: a scrollable reference for every button/dial action,
-    grouped into what they do while reading vs. everywhere else -- see
-    HELP_LINES/renderControls()
+    Settings) -- 5 items, shown 3 at a time as two pages (dial past the 3rd
+    item to reach the other 2), see HOME_ITEM_COUNT below
   - Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn,
     invert display, book sort order, reading-progress indicator, text size,
-    and factory reset -- all persisted with the ESP32's own Preferences/NVS
-    storage, not LittleFS
+    a controls reference, and factory reset -- all but the controls
+    reference (see below) are persisted with the ESP32's own
+    Preferences/NVS storage, not LittleFS
+  - Controls reference (in Settings): a scrollable list of what every
+    button/dial does, grouped into what they do while reading vs.
+    everywhere else -- see HELP_LINES/renderControls()
   - Text size: 4 steps (Small/Medium/Large/X-Large, 12/16/24/32px), reflowing
     the whole book to the new width/line count from wherever you are --
     everything that depends on layout (page-fraction tracking, the "page up"
@@ -74,14 +75,11 @@
 
 // 1-bit icon/QR bitmaps in EPD_ShowPicture's packed format, generated with
 // tools/image_to_epd.py from hand-drawn Piskel files and QR PNGs.
-// icon_help.h is the one exception -- a bold Arial "?" glyph rendered to a
-// PNG and run through the same script, rather than hand-drawn pixel art.
 #include "generated/icon_book.h"
 #include "generated/icon_bookshelf.h"
 #include "generated/icon_bookmark.h"
 #include "generated/icon_settings.h"
 #include "generated/icon_wifi.h"
-#include "generated/icon_help.h"
 #include "generated/qr_wifi.h"
 #include "generated/qr_webpage.h"
 
@@ -231,7 +229,7 @@ AppScreen currentScreen = SCREEN_READING;
 enum ConfirmAction : uint8_t { CONFIRM_DELETE_BOOK, CONFIRM_DELETE_BOOKMARK, CONFIRM_FACTORY_RESET };
 ConfirmAction confirmAction = CONFIRM_DELETE_BOOK;
 
-constexpr uint8_t HOME_ITEM_COUNT = 6;
+constexpr uint8_t HOME_ITEM_COUNT = 5;
 uint8_t homeSelection = 0;
 
 String bookList[MAX_BOOKS];
@@ -269,10 +267,10 @@ uint32_t bookmarkSlotPages[BOOKMARK_SLOT_COUNT];
 Preferences prefs;
 // 0 = sleep timeout, 1 = deep sleep timeout, 2 = auto page turn,
 // 3 = invert display, 4 = book sort, 5 = progress indicator, 6 = text size,
-// 7 = factory reset. More items than fit on screen at once now, so this
-// scrolls the same way Choose Book does -- see
+// 7 = controls reference, 8 = factory reset. More items than fit on screen
+// at once now, so this scrolls the same way Choose Book does -- see
 // SETTINGS_VISIBLE_ROWS/settingsWindowStart/scrollSettingsWindow().
-constexpr uint8_t SETTINGS_ITEM_COUNT = 8;
+constexpr uint8_t SETTINGS_ITEM_COUNT = 9;
 constexpr uint8_t SETTINGS_VISIBLE_ROWS = 5;
 uint8_t settingsSelection = 0;
 uint8_t settingsWindowStart = 0;
@@ -1824,13 +1822,13 @@ void previousPage() {
 }
 
 // ---------------- MENUS ----------------
-const uint8_t* HOME_ICONS[HOME_ITEM_COUNT] = { iconBook, iconBookshelf, iconBookmark, iconWifi, iconSettings, iconHelp };
-const char* HOME_SHORT_LABELS[HOME_ITEM_COUNT] = { "Read", "Books", "Marks", "Wi-Fi", "Setup", "Help" };
+const uint8_t* HOME_ICONS[HOME_ITEM_COUNT] = { iconBook, iconBookshelf, iconBookmark, iconWifi, iconSettings };
+const char* HOME_SHORT_LABELS[HOME_ITEM_COUNT] = { "Read", "Books", "Marks", "Wi-Fi", "Setup" };
 
 // Icon-first layout: a row of three 48x48 icons with a small label under
 // each, centered as a block in the 250x122 screen, selection shown as a
 // border box rather than a "> " prefix (there's no list to prefix here).
-// 6 items don't fit in one row at this icon size, so they're split into two
+// 5 items don't fit in one row at this icon size, so they're split into two
 // pages of up to HOME_ICONS_PER_PAGE icons each -- dialing past the last
 // item of page 0 moves into page 1 and vice versa (see the modular
 // arithmetic in SCREEN_HOME's dial handling in pollButtons(), which is
@@ -1841,7 +1839,7 @@ constexpr uint8_t HOME_LABEL_FONT = 12;  // 6x12 -- deliberately small/secondary
 constexpr uint16_t HOME_LABEL_Y = HOME_ICON_Y + HOME_ICON_SIZE + 4;
 constexpr uint8_t HOME_ICONS_PER_PAGE = 3;
 const uint16_t HOME_PAGE0_X[HOME_ICONS_PER_PAGE] = { 26, 100, 174 };  // evenly spaced, symmetric margins
-const uint16_t HOME_PAGE1_X[HOME_ITEM_COUNT - HOME_ICONS_PER_PAGE] = { 26, 100, 174 };  // page 1 is a full 3 too now, same spacing as page 0
+const uint16_t HOME_PAGE1_X[HOME_ITEM_COUNT - HOME_ICONS_PER_PAGE] = { 64, 138 };  // centered pair, same spacing rhythm as page 0
 
 void renderHome() {
   beginFrame();
@@ -2136,6 +2134,7 @@ String settingsItemLabel(uint8_t index) {
     case 4: return "Sort: " + sortModeLabel(sortMode);
     case 5: return "Progress: " + progressModeLabel(progressMode);
     case 6: return "Text size: " + textSizeLabel(bookFont);
+    case 7: return "Controls";
     default: return "Factory reset";
   }
 }
@@ -2404,9 +2403,6 @@ void selectHomeItem() {
     case 4:  // Settings
       enterSettings();
       break;
-    case 5:  // Help / Controls
-      enterControls();
-      break;
   }
 }
 
@@ -2573,6 +2569,7 @@ void handleButtons() {
           case 4: cycleSortMode(); break;
           case 5: cycleProgressMode(); break;
           case 6: cycleTextSize(); break;
+          case 7: enterControls(); break;
           default: enterConfirm(CONFIRM_FACTORY_RESET); break;
         }
       }
