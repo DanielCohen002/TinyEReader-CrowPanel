@@ -95,7 +95,7 @@ Open the **Settings** icon from Home (it's on the second Home page -- see [Butto
 - **Auto-turn** -- cycles through Off / 15 sec / 30 sec / 1 min / 2 min. When enabled, the current page auto-advances once that long has passed since the last page change of any kind (a real page turn, a chapter jump, opening a book or bookmark) -- so it doesn't fire right after you've already moved. Stops naturally at the end of the book (`nextPage()` is already a no-op there).
 - **Invert** -- On/Off, black-on-white vs. white-on-black. Forces a full white-fill-and-clear refresh on the next redraw so the polarity flip doesn't ghost.
 - **Sort** -- cycles A-Z / Z-A / Size (largest first). Applies everywhere the library is listed: Choose Book, the Bookmarks screen's book picker, and the web upload page's library view, since they all go through the same `listBooks()`.
-- **Progress** -- cycles Percent / Fraction / Off, controlling the reading screen's corner text specifically (the bottom bar is separate and always on). Fraction shows the current chapter out of the book's total chapter count, not a page count -- see [Reading progress](#reading-progress) below for why.
+- **Progress** -- cycles Percent / Fraction / Bar / Off. One at a time, not layered -- Bar shows the thin bottom bar instead of corner text, Off shows neither. Fraction shows the current chapter out of the book's total chapter count, not a page count -- see [Reading progress](#reading-progress) below for why.
 - **Factory reset** -- wipes every book, reading position, and bookmark on the device, plus every setting on this screen, then reboots. Same Yes/No confirmation as deleting a book; there's no undo.
 
 That's 6 options plus the header -- one more than fits in a single screen at this font size, so this screen scrolls now (same up/down-past-the-edge behavior as Choose Book), rather than trying to cram everything in or drop something else to make room.
@@ -104,10 +104,11 @@ Font size is deliberately not adjustable: `BOOK_MAX_LINES`/`BOOK_CHARS_PER_LINE`
 
 ## Reading progress
 
-The reading screen shows how far you are into the current book two ways, both driven by the current page's start offset:
+The reading screen can show how far you are into the current book one of four ways (Settings -- Progress, see [Settings](#settings) above), all driven by the current page's start offset:
 
-- A thin (2px) bar hugging the very bottom edge of the screen, filled proportionally. Always on.
-- Corner text -- percentage, or a chapter fraction, or off entirely (see [Settings](#settings) above). It's placed at the end of the last visible line rather than in a reserved row of its own, so it doesn't cost any reading space -- but that means it needs the line to actually make room for it. If the line's own text would otherwise collide with it, the line trims back a whole word at a time (never mid-word) until there's genuine space; short lines that already had room keep every word untouched.
+- **Percent** or **Fraction** -- corner text, placed at the end of the last visible line rather than in a reserved row of its own, so it doesn't cost any reading space -- but that means it needs the line to actually make room for it. If the line's own text would otherwise collide with it, the line trims back a whole word at a time (never mid-word) until there's genuine space; short lines that already had room keep every word untouched.
+- **Bar** -- a thin (2px) bar hugging the very bottom edge of the screen, filled proportionally, instead of any corner text.
+- **Off** -- neither.
 
 Fraction mode shows "current chapter / total chapters", not a page number out of a total page count -- an accurate page-of-total would need a full pass over the whole book measuring every line's word-wrap up front (similar cost to `indexChapters()`, but per-line text measurement instead of a byte scan, so slower), and would need redoing whenever you jump to a bookmark or a distant chapter. Chapter count is already known for free (`indexChapters()` runs once per book-open regardless), so that's the cheap number available here.
 
