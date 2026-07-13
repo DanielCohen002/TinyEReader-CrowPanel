@@ -14,10 +14,10 @@ Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between ch
 - True sequential page-up/page-down (always the actual neighboring page, computed by replaying pagination rather than an undo-last-jump stack) — see [Display driver](#display-driver)
 - Chapter skip, using a marker character a book can contain — see [Chapters](#chapters-and-the-epub-converter) below
 - Drop an `.epub` straight onto the upload page and it's converted to `.txt` automatically, right in the browser
-- Reading progress always visible: a percentage tacked onto the end of the last line of text (not its own row), plus a thin bar hugging the very bottom edge of the screen — neither costs a line of reading space
+- Reading progress indicator: percentage or chapter fraction (or off), tacked onto the end of the last line of text rather than its own row — the line trims back a whole word at a time to make genuine room for it when needed, rather than drawing over whatever was already there. Plus an always-on thin bar hugging the very bottom edge. Neither costs a line of reading space
 - Optional auto page turn (off by default) — reading becomes hands-free at a configurable interval
 - Home menu: 5 icons (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi / Settings) shown 3 at a time across two pages, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
-- Settings screen: auto-sleep timeout, auto page turn interval, invert display, book sort order, and factory reset — see [Settings](#settings) below
+- Settings screen: auto-sleep timeout, auto page turn interval, invert display, book sort order, the progress indicator's format, and factory reset — see [Settings](#settings) below
 - Choose Book and the Bookmarks screen's book picker can sort A-Z, Z-A, or by file size
 - Delete a book from Choose Book, or a bookmark from the Bookmarks screen, via the same Yes/No confirmation dialog
 - Two QR codes on the Connect to Wi-Fi screen — one auto-joins the `PocketReader` network, one links out to the project — generated from PNGs with `tools/image_to_epd.py`
@@ -95,11 +95,21 @@ Open the **Settings** icon from Home (it's on the second Home page -- see [Butto
 - **Auto-turn** -- cycles through Off / 15 sec / 30 sec / 1 min / 2 min. When enabled, the current page auto-advances once that long has passed since the last page change of any kind (a real page turn, a chapter jump, opening a book or bookmark) -- so it doesn't fire right after you've already moved. Stops naturally at the end of the book (`nextPage()` is already a no-op there).
 - **Invert** -- On/Off, black-on-white vs. white-on-black. Forces a full white-fill-and-clear refresh on the next redraw so the polarity flip doesn't ghost.
 - **Sort** -- cycles A-Z / Z-A / Size (largest first). Applies everywhere the library is listed: Choose Book, the Bookmarks screen's book picker, and the web upload page's library view, since they all go through the same `listBooks()`.
+- **Progress** -- cycles Percent / Fraction / Off, controlling the reading screen's corner text specifically (the bottom bar is separate and always on). Fraction shows the current chapter out of the book's total chapter count, not a page count -- see [Reading progress](#reading-progress) below for why.
 - **Factory reset** -- wipes every book, reading position, and bookmark on the device, plus every setting on this screen, then reboots. Same Yes/No confirmation as deleting a book; there's no undo.
 
-That's 5 options plus the header, which is exactly as many rows as fit on this screen at this font size -- there's no room left for anything else here (a build-date readout that used to live at the bottom got dropped to make room for Auto-turn/Invert/Sort).
+That's 6 options plus the header -- one more than fits in a single screen at this font size, so this screen scrolls now (same up/down-past-the-edge behavior as Choose Book), rather than trying to cram everything in or drop something else to make room.
 
 Font size is deliberately not adjustable: `BOOK_MAX_LINES`/`BOOK_CHARS_PER_LINE` are derived from a fixed font, and changing it at runtime would need re-paginating the currently-open book and invalidating the page cache -- more risk than the other settings here for a first pass. Battery warning was also considered and skipped: this board has no battery-sense ADC pin wired up in the current hardware, so there's nothing for firmware to read without a hardware modification first.
+
+## Reading progress
+
+The reading screen shows how far you are into the current book two ways, both driven by the current page's start offset:
+
+- A thin (2px) bar hugging the very bottom edge of the screen, filled proportionally. Always on.
+- Corner text -- percentage, or a chapter fraction, or off entirely (see [Settings](#settings) above). It's placed at the end of the last visible line rather than in a reserved row of its own, so it doesn't cost any reading space -- but that means it needs the line to actually make room for it. If the line's own text would otherwise collide with it, the line trims back a whole word at a time (never mid-word) until there's genuine space; short lines that already had room keep every word untouched.
+
+Fraction mode shows "current chapter / total chapters", not a page number out of a total page count -- an accurate page-of-total would need a full pass over the whole book measuring every line's word-wrap up front (similar cost to `indexChapters()`, but per-line text measurement instead of a byte scan, so slower), and would need redoing whenever you jump to a bookmark or a distant chapter. Chapter count is already known for free (`indexChapters()` runs once per book-open regardless), so that's the cheap number available here.
 
 ## Icons and QR codes
 
