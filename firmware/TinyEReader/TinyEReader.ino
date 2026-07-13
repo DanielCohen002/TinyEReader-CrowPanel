@@ -31,7 +31,8 @@
   - Home menu (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi /
     Settings) -- 5 items, shown 3 at a time as two pages (dial past the 3rd
     item to reach the other 2), see HOME_ITEM_COUNT below
-  - Settings screen: adjustable auto-sleep timeout and factory reset, both
+  - Settings screen: auto-sleep timeout, auto page turn, invert display,
+    book sort order, reading-progress indicator, and factory reset -- all
     persisted with the ESP32's own Preferences/NVS storage, not LittleFS
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
     wakes on any button press
@@ -132,6 +133,7 @@ constexpr uint16_t BOOK_LEFT_MARGIN = 4;
 constexpr uint16_t BOOK_TOP_MARGIN = 1;
 constexpr uint16_t BOOK_LINE_HEIGHT = 20;
 constexpr uint8_t BOOK_FONT = 16;
+constexpr uint8_t BOOK_CHAR_WIDTH = 8;  // fixed glyph width in px at BOOK_FONT -- matches BOOK_CHARS_PER_LINE's own math
 constexpr uint8_t BOOK_CHARS_PER_LINE = 30;
 constexpr uint8_t BOOK_MAX_LINES = 6;
 
@@ -786,6 +788,15 @@ String bookTitle(const String& name) {
   return name.endsWith(".txt") ? name.substring(0, name.length() - 4) : name;
 }
 
+// 26 characters is what actually fits on one MENU_FONT-width row at
+// MENU_LEFT_MARGIN on this screen -- used for book names, titles, and other
+// one-line labels shown across the menu screens (Choose Book, Bookmarks,
+// the confirm dialog, and the "Opening..." message).
+String truncateForRow(String text) {
+  if (text.length() > 26) text = text.substring(0, 23) + "...";
+  return text;
+}
+
 String freeSpaceLabel() {
   size_t freeBytes = LittleFS.totalBytes() - LittleFS.usedBytes();
   char buf[24];
@@ -1043,9 +1054,8 @@ void openBook(const String& name) {
   // a couple of seconds on a large book -- show a message first so this reads
   // as "working" rather than a frozen screen. Title gets its own line (rather
   // than sharing one with "Opening") so long titles have more room before
-  // truncating -- same 26-char convention as the book/bookmark list rows.
-  String title = bookTitle(name);
-  if (title.length() > 26) title = title.substring(0, 23) + "...";
+  // truncating.
+  String title = truncateForRow(bookTitle(name));
   showMessage("Opening\n" + title);
 
   currentBookName = name;
@@ -1064,8 +1074,7 @@ void openBook(const String& name) {
 // call renderPageAt() as usual and current place starts tracking again.
 // slot is 0-based; shown to the user as 1-based.
 void openBookAtBookmark(const String& name, uint32_t offset, uint8_t slot) {
-  String title = bookTitle(name);
-  if (title.length() > 26) title = title.substring(0, 23) + "...";
+  String title = truncateForRow(bookTitle(name));
   showMessage("Opening bookmark " + String(slot + 1) + "\n" + title);
 
   currentBookName = name;
@@ -1462,10 +1471,6 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
   return previousStart;
 }
 
-// Split out from renderPageAt() so opening a book at a bookmark can render
-// without touching "current place" (see openBookAtBookmark()) -- everything
-// except the savePosition() call at the end.
-
 // Text for the reading-screen progress indicator, per progressMode -- ""
 // for PROGRESS_OFF and PROGRESS_BAR (the bar is drawn separately, see
 // drawProgressBar() and its call site in renderPageAtCore(), and is
@@ -1509,6 +1514,9 @@ void drawProgressBar(uint32_t offset, size_t size) {
   }
 }
 
+// Split out from renderPageAt() so opening a book at a bookmark can render
+// without touching "current place" (see openBookAtBookmark()) -- everything
+// except the savePosition() call at the end.
 void renderPageAtCore(uint32_t offset) {
   reopenBookAt(offset);
   if (!book) {
@@ -1522,16 +1530,16 @@ void renderPageAtCore(uint32_t offset) {
 
   // Progress indicator: actually make room for it on the last line rather
   // than drawing on top of whatever's already there (which used to block
-  // real words) -- trim whole words off the end of that line, same 8px/char
-  // fixed glyph width as BOOK_CHARS_PER_LINE, until there's space, or leave
-  // it untouched if it was already short enough not to need any.
+  // real words) -- trim whole words off the end of that line until there's
+  // space, or leave it untouched if it was already short enough not to need
+  // any.
   String indicator = (lineCount > 0) ? progressIndicatorText(offset) : "";
   if (indicator.length() > 0) {
-    constexpr uint16_t INDICATOR_GAP = 8;
-    uint16_t indicatorWidth = indicator.length() * 8;
+    constexpr uint16_t INDICATOR_GAP = BOOK_CHAR_WIDTH;
+    uint16_t indicatorWidth = indicator.length() * BOOK_CHAR_WIDTH;
     uint16_t usableWidth = EPD_W - 2 * BOOK_LEFT_MARGIN;
     String& lastLine = lines[lineCount - 1];
-    while (lastLine.length() * 8 + INDICATOR_GAP + indicatorWidth > usableWidth) {
+    while (lastLine.length() * BOOK_CHAR_WIDTH + INDICATOR_GAP + indicatorWidth > usableWidth) {
       int lastSpace = lastLine.lastIndexOf(' ');
       if (lastSpace < 0) {
         lastLine = "";
@@ -1548,7 +1556,7 @@ void renderPageAtCore(uint32_t offset) {
   }
 
   if (indicator.length() > 0) {
-    uint16_t indicatorX = EPD_W - BOOK_LEFT_MARGIN - (uint16_t)(indicator.length() * 8);
+    uint16_t indicatorX = EPD_W - BOOK_LEFT_MARGIN - (uint16_t)(indicator.length() * BOOK_CHAR_WIDTH);
     uint16_t indicatorY = BOOK_TOP_MARGIN + (lineCount - 1) * BOOK_LINE_HEIGHT;
     EPD_ShowString(indicatorX, indicatorY, indicator.c_str(), BLACK, BOOK_FONT);
   }
@@ -1620,17 +1628,63 @@ void renderHome() {
   endFrame();
 }
 
-// Keeps chooseSelection inside [chooseWindowStart, chooseWindowStart +
-// CHOOSE_VISIBLE_ROWS) by scrolling the window the minimum amount needed --
-// called whenever chooseSelection or bookCount changes.
-void scrollChooseWindow() {
-  if (chooseSelection < chooseWindowStart) {
-    chooseWindowStart = chooseSelection;
-  } else if (chooseSelection >= chooseWindowStart + CHOOSE_VISIBLE_ROWS) {
-    chooseWindowStart = chooseSelection - CHOOSE_VISIBLE_ROWS + 1;
+// Shared scrolling-window logic for any screen with a selectable list that
+// might be longer than fits on screen (Choose Book, the Bookmarks screen's
+// book picker, Settings) -- keeps `selection` inside [windowStart,
+// windowStart + visibleRows) by scrolling the window the minimum amount
+// needed. Each screen keeps its own thin named wrapper (scrollChooseWindow()
+// etc.) below so call sites read as what they're scrolling, and each
+// screen's window position stays independent (e.g. Choose Book and the
+// Bookmarks book picker can be scrolled to different places at once).
+void scrollWindow(uint8_t selection, uint8_t& windowStart, uint8_t itemCount, uint8_t visibleRows) {
+  if (selection < windowStart) {
+    windowStart = selection;
+  } else if (selection >= windowStart + visibleRows) {
+    windowStart = selection - visibleRows + 1;
   }
-  uint8_t maxStart = (bookCount > CHOOSE_VISIBLE_ROWS) ? bookCount - CHOOSE_VISIBLE_ROWS : 0;
-  if (chooseWindowStart > maxStart) chooseWindowStart = maxStart;
+  uint8_t maxStart = (itemCount > visibleRows) ? itemCount - visibleRows : 0;
+  if (windowStart > maxStart) windowStart = maxStart;
+}
+
+void scrollChooseWindow() {
+  scrollWindow(chooseSelection, chooseWindowStart, bookCount, CHOOSE_VISIBLE_ROWS);
+}
+
+void scrollBookmarkWindow() {
+  scrollWindow(bookmarkBookSelection, bookmarkWindowStart, bookCount, CHOOSE_VISIBLE_ROWS);
+}
+
+// Shared rendering for a scrollable, selectable book list -- Choose Book and
+// the Bookmarks screen's book picker share this layout exactly (header with
+// ^/v scroll hints once the list is longer than fits, "> "/"  " prefix per
+// row, truncated names), differing only in the header text and what to show
+// when the library is empty (emptyLine2 is optional, pass nullptr to skip
+// it).
+void renderBookListScreen(const String& header, uint8_t selection, uint8_t windowStart,
+                           const char* emptyLine1, const char* emptyLine2) {
+  beginFrame();
+
+  String headerWithHints = header;
+  if (bookCount > CHOOSE_VISIBLE_ROWS) {
+    headerWithHints += "  ";
+    headerWithHints += (windowStart > 0) ? "^" : " ";
+    headerWithHints += (windowStart + CHOOSE_VISIBLE_ROWS < bookCount) ? "v" : " ";
+  }
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, headerWithHints.c_str(), BLACK, MENU_FONT);
+
+  if (bookCount == 0) {
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, emptyLine1, BLACK, MENU_FONT);
+    if (emptyLine2) EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, emptyLine2, BLACK, MENU_FONT);
+  } else {
+    uint8_t windowEnd = min((uint8_t)(windowStart + CHOOSE_VISIBLE_ROWS), bookCount);
+    for (uint8_t i = windowStart; i < windowEnd; i++) {
+      uint8_t row = i - windowStart;
+      String label = (i == selection) ? "> " : "  ";
+      label += truncateForRow(bookList[i]);
+      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (row + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+    }
+  }
+  endFrame();
 }
 
 // Row 0 is a free-space header (plus ^/v hints when the list scrolls); the
@@ -1638,73 +1692,14 @@ void scrollChooseWindow() {
 // time. Dial press opens the highlighted book; dial down opens a Yes/No
 // delete confirmation for it instead (see renderConfirmDelete/enterConfirmDelete).
 void renderChooseBook() {
-  beginFrame();
-  String header = freeSpaceLabel();
-  if (bookCount > CHOOSE_VISIBLE_ROWS) {
-    header += "  ";
-    header += (chooseWindowStart > 0) ? "^" : " ";
-    header += (chooseWindowStart + CHOOSE_VISIBLE_ROWS < bookCount) ? "v" : " ";
-  }
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, header.c_str(), BLACK, MENU_FONT);
-
-  if (bookCount == 0) {
-    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, "No books yet.", BLACK, MENU_FONT);
-    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, "Upload one first.", BLACK, MENU_FONT);
-  } else {
-    uint8_t windowEnd = min((uint8_t)(chooseWindowStart + CHOOSE_VISIBLE_ROWS), bookCount);
-    for (uint8_t i = chooseWindowStart; i < windowEnd; i++) {
-      uint8_t row = i - chooseWindowStart;
-      String label = (i == chooseSelection) ? "> " : "  ";
-      String name = bookList[i];
-      if (name.length() > 26) name = name.substring(0, 23) + "...";
-      label += name;
-      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (row + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
-    }
-  }
-  endFrame();
-}
-
-// Keeps bookmarkBookSelection inside [bookmarkWindowStart, bookmarkWindowStart
-// + CHOOSE_VISIBLE_ROWS) -- same logic as scrollChooseWindow(), kept as a
-// separate function/state rather than reusing chooseWindowStart so the two
-// screens' scroll positions don't interfere with each other.
-void scrollBookmarkWindow() {
-  if (bookmarkBookSelection < bookmarkWindowStart) {
-    bookmarkWindowStart = bookmarkBookSelection;
-  } else if (bookmarkBookSelection >= bookmarkWindowStart + CHOOSE_VISIBLE_ROWS) {
-    bookmarkWindowStart = bookmarkBookSelection - CHOOSE_VISIBLE_ROWS + 1;
-  }
-  uint8_t maxStart = (bookCount > CHOOSE_VISIBLE_ROWS) ? bookCount - CHOOSE_VISIBLE_ROWS : 0;
-  if (bookmarkWindowStart > maxStart) bookmarkWindowStart = maxStart;
+  renderBookListScreen(freeSpaceLabel(), chooseSelection, chooseWindowStart, "No books yet.", "Upload one first.");
 }
 
 // Book picker for the Bookmarks screen -- same layout as renderChooseBook()
 // but dial press moves into SCREEN_BOOKMARK_SLOTS for the highlighted book
 // instead of opening it directly (see enterBookmarkSlots()).
 void renderBookmarkBooks() {
-  beginFrame();
-  String header = "Bookmarks";
-  if (bookCount > CHOOSE_VISIBLE_ROWS) {
-    header += "  ";
-    header += (bookmarkWindowStart > 0) ? "^" : " ";
-    header += (bookmarkWindowStart + CHOOSE_VISIBLE_ROWS < bookCount) ? "v" : " ";
-  }
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, header.c_str(), BLACK, MENU_FONT);
-
-  if (bookCount == 0) {
-    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, "No books yet.", BLACK, MENU_FONT);
-  } else {
-    uint8_t windowEnd = min((uint8_t)(bookmarkWindowStart + CHOOSE_VISIBLE_ROWS), bookCount);
-    for (uint8_t i = bookmarkWindowStart; i < windowEnd; i++) {
-      uint8_t row = i - bookmarkWindowStart;
-      String label = (i == bookmarkBookSelection) ? "> " : "  ";
-      String name = bookList[i];
-      if (name.length() > 26) name = name.substring(0, 23) + "...";
-      label += name;
-      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (row + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
-    }
-  }
-  endFrame();
+  renderBookListScreen("Bookmarks", bookmarkBookSelection, bookmarkWindowStart, "No books yet.", nullptr);
 }
 
 void enterBookmarkBooks() {
@@ -1717,8 +1712,7 @@ void enterBookmarkBooks() {
 
 void renderBookmarkSlots() {
   beginFrame();
-  String title = bookTitle(bookList[bookmarkBookSelection]);
-  if (title.length() > 26) title = title.substring(0, 23) + "...";
+  String title = truncateForRow(bookTitle(bookList[bookmarkBookSelection]));
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, title.c_str(), BLACK, MENU_FONT);
 
   // Percent-through-book is cheap (just the file size, no full scan) and
@@ -1777,7 +1771,7 @@ void renderConfirmDelete() {
       detail = "Erases ALL books & settings";
       break;
   }
-  if (detail.length() > 26) detail = detail.substring(0, 23) + "...";
+  detail = truncateForRow(detail);
 
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, prompt.c_str(), BLACK, MENU_FONT);
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, detail.c_str(), BLACK, MENU_FONT);
@@ -1914,36 +1908,31 @@ void enterSettings() {
   renderSettings();
 }
 
+// Shared by cycleSleepTimeout()/cycleAutoTurn() -- finds `current` in
+// `presets` and returns the next entry, wrapping. Falls back to presets[0]
+// if `current` isn't found (shouldn't happen, since these are only ever set
+// from this same array, but that's a safer default than reading past the
+// array).
+uint32_t nextPreset(const uint32_t presets[], uint8_t count, uint32_t current) {
+  for (uint8_t i = 0; i < count; i++) {
+    if (presets[i] == current) return presets[(i + 1) % count];
+  }
+  return presets[0];
+}
+
 // Steps sleepAfterMs to the next SLEEP_PRESETS_MS entry (wrapping) and
 // persists it -- Preferences/NVS, not LittleFS, since it's device
 // configuration rather than book data (see the global `prefs`/setup()).
 void cycleSleepTimeout() {
-  uint8_t index = 0;
-  for (uint8_t i = 0; i < SLEEP_PRESETS_COUNT; i++) {
-    if (SLEEP_PRESETS_MS[i] == sleepAfterMs) {
-      index = i;
-      break;
-    }
-  }
-  index = (index + 1) % SLEEP_PRESETS_COUNT;
-  sleepAfterMs = SLEEP_PRESETS_MS[index];
+  sleepAfterMs = nextPreset(SLEEP_PRESETS_MS, SLEEP_PRESETS_COUNT, sleepAfterMs);
   prefs.putUInt("sleepMs", sleepAfterMs);
   renderSettings();
 }
 
-// Same idea as cycleSleepTimeout(). lastPageTurnTime is reset here so
-// turning this on doesn't immediately fire using a stale elapsed time --
-// see maybeAutoTurn().
+// lastPageTurnTime is reset here so turning this on doesn't immediately
+// fire using a stale elapsed time -- see maybeAutoTurn().
 void cycleAutoTurn() {
-  uint8_t index = 0;
-  for (uint8_t i = 0; i < AUTO_TURN_PRESETS_COUNT; i++) {
-    if (AUTO_TURN_PRESETS_MS[i] == autoTurnMs) {
-      index = i;
-      break;
-    }
-  }
-  index = (index + 1) % AUTO_TURN_PRESETS_COUNT;
-  autoTurnMs = AUTO_TURN_PRESETS_MS[index];
+  autoTurnMs = nextPreset(AUTO_TURN_PRESETS_MS, AUTO_TURN_PRESETS_COUNT, autoTurnMs);
   prefs.putUInt("autoTurnMs", autoTurnMs);
   lastPageTurnTime = millis();
   renderSettings();
