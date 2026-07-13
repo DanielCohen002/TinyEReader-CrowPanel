@@ -10,13 +10,14 @@ Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between ch
 
 - Multi-book library: each upload adds a book rather than replacing one, up to 3MB per book
 - Remembers your reading position per book, boots straight back into whichever book you read last
-- Up to 3 bookmarks per book, separate from that automatic "current place" — hold Top while reading to save/overwrite one, browse and jump to them from the Bookmarks screen (see [Bookmarks](#bookmarks) below)
+- Up to 3 bookmarks per book, separate from that automatic "current place" — hold Top while reading to save/overwrite one, browse and jump to them from the Bookmarks screen, which always shows both percent and page fraction for each slot regardless of the reading screen's own progress-indicator setting (see [Bookmarks](#bookmarks) below)
 - True sequential page-up/page-down (always the actual neighboring page, computed by replaying pagination rather than an undo-last-jump stack) — see [Display driver](#display-driver)
-- Chapter skip, using a marker character a book can contain — see [Chapters](#chapters-and-the-epub-converter) below
+- Chapter skip, using a marker character a book can contain — see [Chapters](#chapters-and-the-epub-converter) below. Hold the dial up/down instead of tapping repeatedly to keep skipping
 - Drop an `.epub` straight onto the upload page and it's converted to `.txt` automatically, right in the browser
 - Reading progress indicator, one of four: percentage, page fraction, a thin bottom bar, or off. Percent/Fraction are tacked onto the end of the last line of text rather than their own row — the line trims back a whole word at a time to make genuine room when needed, rather than drawing over whatever was already there — so none of the four costs a line of reading space
 - Optional auto page turn (off by default) — reading becomes hands-free at a configurable interval
-- Home menu: 5 icons (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi / Settings) shown 3 at a time across two pages, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
+- Home menu: 6 icons (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi / Settings / Help) shown 3 at a time across two pages, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
+- Help screen: a scrollable reference for every button/dial action, grouped by what they do while reading vs. everywhere else
 - Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn interval, invert display, book sort order, the progress indicator's format, text size, and factory reset — see [Settings](#settings) below
 - Choose Book and the Bookmarks screen's book picker can sort A-Z, Z-A, or by file size
 - Delete a book from Choose Book, or a bookmark from the Bookmarks screen, via the same Yes/No confirmation dialog
@@ -47,11 +48,13 @@ Button meaning depends on which screen is showing:
 
 | | Top | Bottom | Dial rotate | Dial press |
 | --- | --- | --- | --- | --- |
-| Reading a book | Tap = previous page, hold = save/overwrite a bookmark (see [Bookmarks](#bookmarks)) | Next page | Up = previous chapter, down = next chapter | Open Home menu |
-| Home / Choose Book / Bookmarks / Settings / confirm dialog | Jump to Home (cancels the confirm dialog without acting) | On a book in Choose Book, or a bookmark in the Bookmarks screen, opens the delete confirmation | Move selection up/down | Select highlighted item |
+| Reading a book | Tap = previous page, hold = save/overwrite a bookmark (see [Bookmarks](#bookmarks)) | Next page | Up = previous chapter, down = next chapter — hold either to keep skipping instead of tapping repeatedly | Open Home menu |
+| Home / Choose Book / Bookmarks / Settings / Help / confirm dialog | Jump to Home (cancels the confirm dialog without acting) | On a book in Choose Book, or a bookmark in the Bookmarks screen, opens the delete confirmation | Move selection up/down (scrolls the Help screen instead, which has nothing to select) | Select highlighted item (also just returns Home from Help) |
 | Connect to Wi-Fi | Back to Home | — | — | Back to Home |
 
-Home no longer fits all 5 items in one row at the icon size used, so it's paged: dial past the 3rd item (Bookmarks) to reach the other 2 (Connect to Wi-Fi / Settings), same dial up/down as everywhere else.
+This same table, plus which screens count as "reading" vs. "everywhere else," is also on the device itself — the **Help** icon on Home.
+
+Home no longer fits all 6 items in one row at the icon size used, so it's paged: dial past the 3rd item (Bookmarks) to reach the other 3 (Connect to Wi-Fi / Settings / Help), same dial up/down as everywhere else.
 
 ## Display driver
 
@@ -85,7 +88,7 @@ py tools\epub_to_txt.py yourbook.epub
 
 Separate from the automatic "current place" (which always tracks wherever you last turned a page), each book gets up to 3 explicit bookmarks. Hold **Top** while reading to save one at the current page -- it fills the first empty slot, or overwrites slot 1 once all three are used, and flashes "Bookmark N saved" briefly so you know which slot changed. Tapping Top normally (not holding) still turns to the previous page as usual; the two are told apart by how long Top stays down (`BOOKMARK_HOLD_MS`, 600ms).
 
-To use one, open the **Bookmarks** icon from Home, pick a book, then pick a slot -- each shows how far into the book it is (percentage or page fraction, following the same Settings -- Progress choice as the reading screen -- see [Reading progress](#reading-progress) below), or "(empty)" if unused. Opening a bookmark does **not** touch "current place"; if you keep reading forward from there, current place starts tracking again normally. Bottom on a highlighted slot deletes it, with the same Yes/No confirmation as deleting a book.
+To use one, open the **Bookmarks** icon from Home, pick a book, then pick a slot -- each shows how far into the book it is as both a percentage and a page fraction together (e.g. `128/512 (25%)`), regardless of the reading screen's own Settings -- Progress choice (see [Reading progress](#reading-progress) below) -- or "(empty)" if unused. Computing both is a real pagination sweep through the book, so opening this screen can take a moment on a large book (a "Loading..." message covers it). Opening a bookmark does **not** touch "current place"; if you keep reading forward from there, current place starts tracking again normally. Bottom on a highlighted slot deletes it, with the same Yes/No confirmation as deleting a book.
 
 ## Settings
 
@@ -115,9 +118,9 @@ The reading screen can show how far you are into the current book one of four wa
 
 Percent and Fraction share the same corner placement: the end of the last visible line rather than a reserved row of its own, so neither costs any reading space -- but that means the line needs to actually make room for it. If the line's own text would otherwise collide with it, the line trims back a whole word at a time (never mid-word) until there's genuine space; short lines that already had room keep every word untouched.
 
-**Fraction's cost.** There's no way to know "page 42 of 300" without actually replaying word-wrap pagination -- unlike Percent (a cheap byte-offset ratio) or the old chapter-based version this used to show, a real page count means calling the same pagination logic used for rendering itself, repeatedly, either across the whole book (for the total) or up to the current position (to know which page that is). To keep this from slowing down every single page turn, only jumps (opening a book, jumping to a bookmark, chapter skip, or switching Settings -- Progress to Fraction) trigger a fresh sweep; turning pages normally with Top/Bottom just steps the page number by one instead. Both sweeps only run while Fraction is actually selected -- picking Percent, Bar, or Off skips them entirely, so there's no cost unless you're using this specific mode. On a large book, expect a book-open or chapter-skip in Fraction mode to take noticeably longer than in the other modes (same order of cost as `indexChapters()`, but per-line word-wrap work instead of a byte scan, so slower).
+**Fraction's cost.** There's no way to know "page 42 of 300" without actually replaying word-wrap pagination -- unlike Percent (a cheap byte-offset ratio) or the old chapter-based version this used to show, a real page count means calling the same pagination logic used for rendering itself, repeatedly, either across the whole book (for the total) or up to the current position (to know which page that is). To keep this from slowing down every single page turn, only jumps (opening a book, jumping to a bookmark, or switching Settings -- Progress to Fraction) trigger a fresh sweep; turning pages normally with Top/Bottom just steps the page number by one instead, and chapter skip looks its target page number up for free in a table built during that same sweep rather than replaying pagination all over again for every skip. Both sweeps only run while Fraction is actually selected -- picking Percent, Bar, or Off skips them entirely, so there's no cost unless you're using this specific mode. On a large book, expect a book-open in Fraction mode to take noticeably longer than in the other modes (same order of cost as `indexChapters()`, but per-line word-wrap work instead of a byte scan, so slower) -- chapter skips within that same book, once open, stay fast.
 
-The Bookmarks screen's slot list (see [Bookmarks](#bookmarks) above) follows the same Percent/Fraction choice -- Bar and Off don't have a bookmark-list equivalent, so it falls back to Percent for those two. Since it can be browsing a different book's bookmarks than whatever's actually open for reading, it keeps its own separate page-count sweep (computed once per visit to that screen, not on every cursor move between the 3 slots) rather than reusing the reading screen's numbers.
+The Bookmarks screen's slot list (see [Bookmarks](#bookmarks) above) always shows both Percent and Fraction together for each slot, regardless of this setting -- unlike the reading screen (which re-renders on every page turn, so picking a cheap format matters), Bookmarks is a one-shot render, so paying for both there is a small, bounded cost rather than a per-frame one. Since it can be browsing a different book's bookmarks than whatever's actually open for reading, it keeps its own separate page-count sweep (computed once per visit to that screen, not on every cursor move between the 3 slots) rather than reusing the reading screen's numbers.
 
 ## Icons and QR codes
 

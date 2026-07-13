@@ -29,8 +29,11 @@
     Gutenberg-style, one fixed-width source line per line) reflow to this
     screen's width instead of leaving a gap at every source line boundary
   - Home menu (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi /
-    Settings) -- 5 items, shown 3 at a time as two pages (dial past the 3rd
-    item to reach the other 2), see HOME_ITEM_COUNT below
+    Settings / Help) -- 6 items, shown 3 at a time as two pages (dial past
+    the 3rd item to reach the other 3), see HOME_ITEM_COUNT below
+  - Help screen: a scrollable reference for every button/dial action,
+    grouped into what they do while reading vs. everywhere else -- see
+    HELP_LINES/renderControls()
   - Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn,
     invert display, book sort order, reading-progress indicator, text size,
     and factory reset -- all persisted with the ESP32's own Preferences/NVS
@@ -47,6 +50,11 @@
     really in that tier and not just light-sleeping -- wake from that one
     takes a few seconds (a real reboot) instead of being instant, but picks
     back up in the same book/page either way
+  - Chapter skip repeats while dial up/down is held, instead of needing a
+    fresh tap per chapter -- see CHAPTER_SKIP_REPEAT_DELAY_MS below
+  - Bookmarks always shows both percent and page-fraction for each slot,
+    regardless of the reading screen's own Settings -> Progress choice --
+    see renderBookmarkSlots()
 
   Display driver: EPD.h / EPD_Init.h / spi.h (bundled in this sketch folder).
   These are Elecrow's own driver files for this exact panel, pulled from their
@@ -66,11 +74,14 @@
 
 // 1-bit icon/QR bitmaps in EPD_ShowPicture's packed format, generated with
 // tools/image_to_epd.py from hand-drawn Piskel files and QR PNGs.
+// icon_help.h is the one exception -- a bold Arial "?" glyph rendered to a
+// PNG and run through the same script, rather than hand-drawn pixel art.
 #include "generated/icon_book.h"
 #include "generated/icon_bookshelf.h"
 #include "generated/icon_bookmark.h"
 #include "generated/icon_settings.h"
 #include "generated/icon_wifi.h"
+#include "generated/icon_help.h"
 #include "generated/qr_wifi.h"
 #include "generated/qr_webpage.h"
 
@@ -163,6 +174,12 @@ uint32_t currentPageNumber = 1;
 constexpr uint8_t MAX_BOOKS = 64;
 constexpr uint8_t CHOOSE_VISIBLE_ROWS = 5;  // one row is a free-space header, see renderChooseBook()
 constexpr unsigned long BOOKMARK_HOLD_MS = 600;  // hold Top this long while reading to save a bookmark
+// Holding dial up/down while reading keeps skipping chapters instead of
+// needing a fresh tap per chapter -- the first skip still fires instantly
+// on press same as always, then if it's still held this much longer it
+// starts repeating, at this interval, until released. See handleButtons().
+constexpr unsigned long CHAPTER_SKIP_REPEAT_DELAY_MS = 600;
+constexpr unsigned long CHAPTER_SKIP_REPEAT_INTERVAL_MS = 350;
 
 // Book text layout. Font size is a Settings-screen option (Text size, see
 // cycleTextSize()/TEXT_SIZE_PRESETS_PX below) -- bookFont and everything
@@ -203,7 +220,7 @@ WebServer server(80);
 
 enum AppScreen : uint8_t {
   SCREEN_READING, SCREEN_HOME, SCREEN_CHOOSE_BOOK, SCREEN_WIFI_INFO, SCREEN_CONFIRM_DELETE,
-  SCREEN_BOOKMARK_BOOKS, SCREEN_BOOKMARK_SLOTS, SCREEN_SETTINGS
+  SCREEN_BOOKMARK_BOOKS, SCREEN_BOOKMARK_SLOTS, SCREEN_SETTINGS, SCREEN_CONTROLS
 };
 AppScreen currentScreen = SCREEN_READING;
 
@@ -214,7 +231,7 @@ AppScreen currentScreen = SCREEN_READING;
 enum ConfirmAction : uint8_t { CONFIRM_DELETE_BOOK, CONFIRM_DELETE_BOOKMARK, CONFIRM_FACTORY_RESET };
 ConfirmAction confirmAction = CONFIRM_DELETE_BOOK;
 
-constexpr uint8_t HOME_ITEM_COUNT = 5;
+constexpr uint8_t HOME_ITEM_COUNT = 6;
 uint8_t homeSelection = 0;
 
 String bookList[MAX_BOOKS];
@@ -235,8 +252,9 @@ uint8_t bookmarkSlotSelection = 0;
 constexpr uint8_t BOOKMARK_SLOT_COUNT = 3;
 constexpr uint32_t BOOKMARK_EMPTY = 0xFFFFFFFF;
 uint32_t bookmarkOffsets[BOOKMARK_SLOT_COUNT];
-// Page-fraction cache for the Bookmarks screen (PROGRESS_FRACTION only --
-// see renderBookmarkSlots()). Computed once in enterBookmarkSlots(), not on
+// Page-fraction cache for the Bookmarks screen -- shown there alongside
+// percent regardless of the Settings -> Progress choice (see
+// renderBookmarkSlots()). Computed once in enterBookmarkSlots(), not on
 // every render, since moving the cursor between the 3 slots re-renders far
 // more often than the book being browsed actually changes, and each of
 // these numbers is a real pagination sweep (see computeTotalPageCount()/
@@ -259,6 +277,11 @@ constexpr uint8_t SETTINGS_VISIBLE_ROWS = 5;
 uint8_t settingsSelection = 0;
 uint8_t settingsWindowStart = 0;
 
+// Controls screen state -- a pure scrollable reference (see HELP_LINES/
+// renderControls() below), no per-row selection/action like Settings has,
+// just a scroll position.
+uint8_t helpScrollOffset = 0;
+
 String currentBookName;  // filename only, e.g. "MyNovel.txt" -- lives under /books/
 
 File book;
@@ -274,6 +297,14 @@ unsigned long lastActivity = 0;
 constexpr uint16_t MAX_CHAPTERS = 200;
 uint32_t chapterOffsets[MAX_CHAPTERS];
 uint16_t chapterCount = 0;
+// Page number (1-based) that each chapterOffsets[i] falls on -- filled in
+// by computeTotalPageCount() as a side effect of its own full sweep (see
+// there), so nextChapter()/previousChapter() can look a chapter's page
+// number up for free in PROGRESS_FRACTION mode instead of each running
+// their own separate O(book length) sweep via pageNumberForOffset() on
+// every single skip. Only valid exactly when totalPageCount is (same
+// PROGRESS_FRACTION-only guard, refreshed together by refreshPageTracking()).
+uint32_t chapterPageNumbers[MAX_CHAPTERS];
 
 // Page boundaries depend on word-wrapping, so there's no way to compute
 // "the page before this byte offset" directly -- see findPreviousPageStart.
@@ -1110,7 +1141,7 @@ void deleteSelectedBook() {
 
 void renderPageAt(uint32_t offset);
 void renderPageAtCore(uint32_t offset);
-uint32_t computeTotalPageCount();
+uint32_t computeTotalPageCount(bool trackChapterPages = false);
 uint32_t pageNumberForOffset(uint32_t offset);
 void refreshPageTracking(uint32_t offset);
 
@@ -1141,9 +1172,11 @@ void nextChapter() {
   for (uint16_t i = 0; i < chapterCount; i++) {
     if (chapterOffsets[i] > pageStart) {
       // A chapter skip is a jump, not a sequential step, so currentPageNumber
-      // needs a fresh sweep rather than nextPage()'s cheap +1 -- see
-      // pageNumberForOffset()'s own comment.
-      if (progressMode == PROGRESS_FRACTION) currentPageNumber = pageNumberForOffset(chapterOffsets[i]);
+      // can't reuse nextPage()'s cheap +1 -- but unlike a genuinely new
+      // offset, a chapter start's page number is already known for free
+      // from chapterPageNumbers[] (see computeTotalPageCount()), so this
+      // doesn't need pageNumberForOffset()'s own O(book length) sweep.
+      if (progressMode == PROGRESS_FRACTION) currentPageNumber = chapterPageNumbers[i];
       renderPageAt(chapterOffsets[i]);
       return;
     }
@@ -1153,13 +1186,13 @@ void nextChapter() {
 void previousChapter() {
   for (int16_t i = (int16_t)chapterCount - 1; i >= 0; i--) {
     if (chapterOffsets[i] < pageStart) {
-      if (progressMode == PROGRESS_FRACTION) currentPageNumber = pageNumberForOffset(chapterOffsets[i]);
+      if (progressMode == PROGRESS_FRACTION) currentPageNumber = chapterPageNumbers[i];
       renderPageAt(chapterOffsets[i]);
       return;
     }
   }
   if (chapterCount > 0) {
-    if (progressMode == PROGRESS_FRACTION) currentPageNumber = pageNumberForOffset(chapterOffsets[0]);
+    if (progressMode == PROGRESS_FRACTION) currentPageNumber = chapterPageNumbers[0];
     renderPageAt(chapterOffsets[0]);
   }
 }
@@ -1593,16 +1626,40 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
 // order of cost as indexChapters(), but per-line word-wrap work instead of
 // a byte scan) -- only ever called while PROGRESS_FRACTION is actually
 // selected, not unconditionally on every book-open.
-uint32_t computeTotalPageCount() {
+//
+// trackChapterPages: also records, in the same pass, which page number each
+// entry in chapterOffsets[] lands on (chapterPageNumbers[]) -- letting
+// nextChapter()/previousChapter() look those up for free afterward instead
+// of each running their own separate O(book length) sweep. ONLY pass true
+// when `book`/fileSize definitely point at the same book chapterOffsets[]
+// was indexed from (i.e. from refreshPageTracking(), which always reopens
+// currentBookName first) -- enterBookmarkSlots() also calls this function,
+// but temporarily repoints book/fileSize at whichever book is being
+// browsed for bookmarks, which frequently isn't the current reading book,
+// so it must NOT opt into this (leaves the default, false).
+uint32_t computeTotalPageCount(bool trackChapterPages) {
   if (!book || fileSize == 0) return 1;
   uint32_t count = 0;
   uint32_t pos = 0;
+  uint16_t chapterIdx = 0;
   while (true) {
     count++;
+    if (trackChapterPages) {
+      while (chapterIdx < chapterCount && chapterOffsets[chapterIdx] <= pos) {
+        chapterPageNumbers[chapterIdx] = count;
+        chapterIdx++;
+      }
+    }
     if (pos >= fileSize) break;
     uint32_t next = computePageEnd(pos, nullptr, nullptr);
     if (next <= pos) break;  // malformed-input safety net
     pos = next;
+  }
+  if (trackChapterPages) {
+    while (chapterIdx < chapterCount) {
+      chapterPageNumbers[chapterIdx] = count;  // trailing chapter(s) starting exactly at EOF
+      chapterIdx++;
+    }
   }
   return count;
 }
@@ -1650,7 +1707,7 @@ void refreshPageTracking(uint32_t offset) {
     return;
   }
   reopenBookAt(offset);
-  totalPageCount = computeTotalPageCount();
+  totalPageCount = computeTotalPageCount(/* trackChapterPages= */ true);
   currentPageNumber = pageNumberForOffset(offset);
 }
 
@@ -1767,13 +1824,13 @@ void previousPage() {
 }
 
 // ---------------- MENUS ----------------
-const uint8_t* HOME_ICONS[HOME_ITEM_COUNT] = { iconBook, iconBookshelf, iconBookmark, iconWifi, iconSettings };
-const char* HOME_SHORT_LABELS[HOME_ITEM_COUNT] = { "Read", "Books", "Marks", "Wi-Fi", "Setup" };
+const uint8_t* HOME_ICONS[HOME_ITEM_COUNT] = { iconBook, iconBookshelf, iconBookmark, iconWifi, iconSettings, iconHelp };
+const char* HOME_SHORT_LABELS[HOME_ITEM_COUNT] = { "Read", "Books", "Marks", "Wi-Fi", "Setup", "Help" };
 
 // Icon-first layout: a row of three 48x48 icons with a small label under
 // each, centered as a block in the 250x122 screen, selection shown as a
 // border box rather than a "> " prefix (there's no list to prefix here).
-// 5 items don't fit in one row at this icon size, so they're split into two
+// 6 items don't fit in one row at this icon size, so they're split into two
 // pages of up to HOME_ICONS_PER_PAGE icons each -- dialing past the last
 // item of page 0 moves into page 1 and vice versa (see the modular
 // arithmetic in SCREEN_HOME's dial handling in pollButtons(), which is
@@ -1784,7 +1841,7 @@ constexpr uint8_t HOME_LABEL_FONT = 12;  // 6x12 -- deliberately small/secondary
 constexpr uint16_t HOME_LABEL_Y = HOME_ICON_Y + HOME_ICON_SIZE + 4;
 constexpr uint8_t HOME_ICONS_PER_PAGE = 3;
 const uint16_t HOME_PAGE0_X[HOME_ICONS_PER_PAGE] = { 26, 100, 174 };  // evenly spaced, symmetric margins
-const uint16_t HOME_PAGE1_X[HOME_ITEM_COUNT - HOME_ICONS_PER_PAGE] = { 64, 138 };  // centered pair, same spacing rhythm as page 0
+const uint16_t HOME_PAGE1_X[HOME_ITEM_COUNT - HOME_ICONS_PER_PAGE] = { 26, 100, 174 };  // page 1 is a full 3 too now, same spacing as page 0
 
 void renderHome() {
   beginFrame();
@@ -1893,34 +1950,25 @@ void enterBookmarkBooks() {
   renderBookmarkBooks();
 }
 
+// Unlike the reading screen (which shows whichever single format Settings
+// -> Progress picked, re-rendering every page turn so the cost of picking
+// one has to stay cheap), this is a one-shot render, and a bookmark's whole
+// point is deciding at a glance whether it's the one you want -- so it
+// always shows both percent and page fraction together, regardless of that
+// setting. Both are precomputed in enterBookmarkSlots().
 void renderBookmarkSlots() {
   beginFrame();
   String title = truncateForRow(bookTitle(bookList[bookmarkBookSelection]));
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, title.c_str(), BLACK, MENU_FONT);
-
-  bool showFraction = (progressMode == PROGRESS_FRACTION);
-
-  // Percent-through-book is cheap (just the file size, no full scan) and
-  // more useful at a glance here than a raw byte offset -- only needed
-  // when not showing the page fraction instead (already computed in
-  // enterBookmarkSlots(), see bookmarkTotalPages/bookmarkSlotPages).
-  size_t size = 0;
-  if (!showFraction) {
-    File f = LittleFS.open(bookPath(bookList[bookmarkBookSelection]), "r");
-    size = f ? f.size() : 0;
-    if (f) f.close();
-  }
 
   for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
     String label = (i == bookmarkSlotSelection) ? "> " : "  ";
     label += String(i + 1) + ": ";
     if (bookmarkOffsets[i] == BOOKMARK_EMPTY) {
       label += "(empty)";
-    } else if (showFraction) {
-      label += String(bookmarkSlotPages[i]) + "/" + String(bookmarkTotalPages);
     } else {
-      uint8_t pct = (size > 0) ? (uint8_t)(((uint64_t)bookmarkOffsets[i] * 100) / size) : 0;
-      label += String(pct) + "%";
+      uint8_t pct = (fileSize > 0) ? (uint8_t)(((uint64_t)bookmarkOffsets[i] * 100) / fileSize) : 0;
+      label += String(bookmarkSlotPages[i]) + "/" + String(bookmarkTotalPages) + " (" + String(pct) + "%)";
     }
     EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (i + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
   }
@@ -1931,21 +1979,28 @@ void enterBookmarkSlots() {
   loadBookmarks(bookList[bookmarkBookSelection], bookmarkOffsets);
   bookmarkSlotSelection = 0;
 
-  if (progressMode == PROGRESS_FRACTION) {
-    // Temporarily points the shared `book`/fileSize at this bookmark's own
-    // book to reuse the same pagination sweep the reading screen uses --
-    // safe outside SCREEN_READING, since reopenBookAt() always freshly
-    // reopens the correct file before anything reads `book`/fileSize again
-    // (see its call at the top of renderPageAtCore()), regardless of what
-    // they were left pointing to here.
-    if (book) book.close();
-    book = LittleFS.open(bookPath(bookList[bookmarkBookSelection]), "r");
-    fileSize = book ? book.size() : 0;
+  // Always computed now (used to be gated behind PROGRESS_FRACTION, back
+  // when this screen only showed one format) -- see renderBookmarkSlots().
+  // A real pagination sweep, same cost class as indexChapters() opening a
+  // book, so this can take a couple of seconds on a large book; the
+  // "Loading..." message is here for the same reason openBook() shows one.
+  //
+  // Temporarily points the shared `book`/fileSize at this bookmark's own
+  // book to reuse the same pagination sweep the reading screen uses --
+  // safe outside SCREEN_READING, since reopenBookAt() always freshly
+  // reopens the correct file before anything reads `book`/fileSize again
+  // (see its call at the top of renderPageAtCore()), regardless of what
+  // they were left pointing to here. renderBookmarkSlots() also reads this
+  // same fileSize for the percent figure, rather than reopening the file
+  // again just to ask its size a second time.
+  if (book) book.close();
+  book = LittleFS.open(bookPath(bookList[bookmarkBookSelection]), "r");
+  fileSize = book ? book.size() : 0;
 
-    bookmarkTotalPages = computeTotalPageCount();
-    for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
-      bookmarkSlotPages[i] = (bookmarkOffsets[i] != BOOKMARK_EMPTY) ? pageNumberForOffset(bookmarkOffsets[i]) : 0;
-    }
+  showMessage("Loading...");
+  bookmarkTotalPages = computeTotalPageCount();
+  for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
+    bookmarkSlotPages[i] = (bookmarkOffsets[i] != BOOKMARK_EMPTY) ? pageNumberForOffset(bookmarkOffsets[i]) : 0;
   }
 
   currentScreen = SCREEN_BOOKMARK_SLOTS;
@@ -2245,6 +2300,80 @@ void factoryReset() {
   ESP.restart();
 }
 
+// ---------------- CONTROLS (button/dial reference) ----------------
+// Grouped the same way the README's own button table is: what each control
+// does while actually reading a book vs. everywhere else (Home, Choose
+// Book, Bookmarks, Settings, and the Yes/No confirm screens all share the
+// same "Menus" behavior), plus the one further exception (the Wi-Fi
+// screen). Kept to plain fixed strings rather than trying to generate this
+// from the same logic handleButtons() runs, since that logic is spread
+// across a big screen-by-screen switch and isn't naturally describable as
+// a list of lines -- this can drift from it if that switch changes without
+// a matching update here, same risk any hand-written doc/code pair has.
+const char* const HELP_LINES[] = {
+  "IN READER",
+  "Top tap: previous page",
+  "Top hold: save bookmark",
+  "Bottom: next page",
+  "Dial up/down: prev/next",
+  "  chapter (hold to repeat)",
+  "Dial press: Home menu",
+  "",
+  "IN MENUS",
+  "(Home, Choose Book,",
+  " Bookmarks, Settings,",
+  " Yes/No confirms)",
+  "Top: back to Home",
+  "  (or cancels a confirm)",
+  "Bottom: delete, where shown",
+  "Dial up/down: move selection",
+  "Dial press: select",
+  "",
+  "WI-FI SCREEN",
+  "Top or dial press: Home",
+};
+constexpr uint8_t HELP_LINE_COUNT = sizeof(HELP_LINES) / sizeof(HELP_LINES[0]);
+// 5 content rows fit below the header, same math as SETTINGS_VISIBLE_ROWS.
+constexpr uint8_t HELP_VISIBLE_ROWS = 5;
+
+void renderControls() {
+  beginFrame();
+
+  String header = "Controls";
+  if (HELP_LINE_COUNT > HELP_VISIBLE_ROWS) {
+    header += "  ";
+    header += (helpScrollOffset > 0) ? "^" : " ";
+    header += (helpScrollOffset + HELP_VISIBLE_ROWS < HELP_LINE_COUNT) ? "v" : " ";
+  }
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, header.c_str(), BLACK, MENU_FONT);
+
+  uint8_t windowEnd = min((uint8_t)(helpScrollOffset + HELP_VISIBLE_ROWS), HELP_LINE_COUNT);
+  for (uint8_t i = helpScrollOffset; i < windowEnd; i++) {
+    uint8_t row = i - helpScrollOffset;
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (row + 1) * MENU_LINE_HEIGHT, HELP_LINES[i], BLACK, MENU_FONT);
+  }
+
+  endFrame();
+}
+
+void enterControls() {
+  helpScrollOffset = 0;
+  currentScreen = SCREEN_CONTROLS;
+  renderControls();
+}
+
+// delta is +1/-1 -- one line per dial tick, clamped to the line count
+// rather than wrapping, since there's no "selected row" to carry the
+// wraparound feel Settings/Choose Book have.
+void scrollControls(int8_t delta) {
+  int16_t next = (int16_t)helpScrollOffset + delta;
+  if (next < 0) next = 0;
+  uint8_t maxStart = (HELP_LINE_COUNT > HELP_VISIBLE_ROWS) ? HELP_LINE_COUNT - HELP_VISIBLE_ROWS : 0;
+  if (next > maxStart) next = maxStart;
+  helpScrollOffset = (uint8_t)next;
+  renderControls();
+}
+
 void enterHome() {
   currentScreen = SCREEN_HOME;
   homeSelection = 0;
@@ -2275,6 +2404,9 @@ void selectHomeItem() {
     case 4:  // Settings
       enterSettings();
       break;
+    case 5:  // Help / Controls
+      enterControls();
+      break;
   }
 }
 
@@ -2287,6 +2419,9 @@ void handleButtons() {
   static bool lastDialPress = false;
   static unsigned long menuHoldStart = 0;
   static bool menuHoldFired = false;
+  static unsigned long dialUpHoldStart = 0;
+  static unsigned long dialDownHoldStart = 0;
+  static unsigned long lastChapterRepeatTime = 0;
 
   bool nowMenu = pressed(BTN_MENU);
   bool nowBack = pressed(BTN_BACK);
@@ -2316,7 +2451,21 @@ void handleButtons() {
   if (menuHoldTriggered) menuHoldFired = true;
   bool menuShortRelease = menuReleased && !menuHoldFired;
 
-  if (menuTapped || backTapped || dialDownTapped || dialUpTapped || dialPressTapped || menuHoldTriggered) {
+  // Dial up/down hold-to-repeat (SCREEN_READING's chapter skip only -- see
+  // its use below). The tap itself (dialUpTapped/dialDownTapped) always
+  // fires the first skip instantly, unaffected by any of this; holding
+  // past CHAPTER_SKIP_REPEAT_DELAY_MS starts additional skips every
+  // CHAPTER_SKIP_REPEAT_INTERVAL_MS on top of that, until released.
+  if (dialUpTapped) dialUpHoldStart = millis();
+  if (dialDownTapped) dialDownHoldStart = millis();
+  bool dialUpRepeat = nowDialUp && millis() - dialUpHoldStart >= CHAPTER_SKIP_REPEAT_DELAY_MS &&
+                       millis() - lastChapterRepeatTime >= CHAPTER_SKIP_REPEAT_INTERVAL_MS;
+  bool dialDownRepeat = nowDialDown && millis() - dialDownHoldStart >= CHAPTER_SKIP_REPEAT_DELAY_MS &&
+                         millis() - lastChapterRepeatTime >= CHAPTER_SKIP_REPEAT_INTERVAL_MS;
+  if (dialUpRepeat || dialDownRepeat) lastChapterRepeatTime = millis();
+
+  if (menuTapped || backTapped || dialDownTapped || dialUpTapped || dialPressTapped || menuHoldTriggered ||
+      dialUpRepeat || dialDownRepeat) {
     touchActivity();
   }
 
@@ -2327,6 +2476,8 @@ void handleButtons() {
       if (backTapped) nextPage();
       if (dialUpTapped) previousChapter();
       if (dialDownTapped) nextChapter();
+      if (dialUpRepeat) previousChapter();
+      if (dialDownRepeat) nextChapter();
       if (dialPressTapped) enterHome();
       break;
 
@@ -2426,6 +2577,12 @@ void handleButtons() {
         }
       }
       if (menuTapped) enterHome();
+      break;
+
+    case SCREEN_CONTROLS:
+      if (dialUpTapped) scrollControls(-1);
+      if (dialDownTapped) scrollControls(1);
+      if (menuTapped || dialPressTapped) enterHome();
       break;
 
     case SCREEN_CONFIRM_DELETE:
