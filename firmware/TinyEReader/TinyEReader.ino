@@ -140,19 +140,25 @@ constexpr uint64_t DEEP_SLEEP_CHECK_INTERVAL_US = 30ULL * 1000000ULL;
 // Auto page turn: same idea as sleepAfterMs, 0 means "off". Reuses
 // sleepPresetLabel() for its "N sec"/"N min" formatting (see renderSettings()).
 uint32_t autoTurnMs = 0;
-const uint32_t AUTO_TURN_PRESETS_MS[] = { 0, 15000, 30000, 60000, 120000 };
+const uint32_t AUTO_TURN_PRESETS_MS[] = { 0, 5000, 30000, 60000, 120000 };
 constexpr uint8_t AUTO_TURN_PRESETS_COUNT = 5;
 unsigned long lastPageTurnTime = 0;  // see maybeAutoTurn()
 bool invertDisplay = false;          // see toggleInvertDisplay(), applied in endFrame()
 enum SortMode : uint8_t { SORT_AZ, SORT_ZA, SORT_SIZE };
 SortMode sortMode = SORT_AZ;         // applied in listBooks() via sortBookList()
 // Reading-screen progress indicator -- one of these four, never more than
-// one at a time (see renderPageAtCore()). PROGRESS_FRACTION shows "current
-// page / total pages" -- see computeTotalPageCount()/pageNumberForOffset()
-// for how, and totalPageCount/currentPageNumber below for the cost
-// trade-off of keeping them accurate.
-enum ProgressMode : uint8_t { PROGRESS_PERCENT, PROGRESS_FRACTION, PROGRESS_BAR, PROGRESS_OFF };
-ProgressMode progressMode = PROGRESS_PERCENT;
+// one at a time (see renderPageAtCore()). Declared in this order (None,
+// Bar, Percent, Fraction) because cycleProgressMode() just steps the
+// underlying enum value by one -- this IS the cycle order shown in
+// Settings, not just a listing. Off by default: every mode past None costs
+// either reading-line space (Percent/Fraction) or a lookup vs. the free
+// path (Fraction's real cost, see below), so showing nothing is the
+// zero-surprise starting point. PROGRESS_FRACTION shows "current page /
+// total pages" -- see computeTotalPageCount()/pageNumberForOffset() for
+// how, and totalPageCount/currentPageNumber below for the cost trade-off
+// of keeping them accurate.
+enum ProgressMode : uint8_t { PROGRESS_OFF, PROGRESS_BAR, PROGRESS_PERCENT, PROGRESS_FRACTION };
+ProgressMode progressMode = PROGRESS_OFF;
 // Page-fraction tracking for the currently-open-for-reading book (the
 // Bookmarks screen keeps its own separate bookmarkTotalPages/
 // bookmarkSlotPages instead of these, since it can be browsing a different
@@ -2107,7 +2113,7 @@ String progressModeLabel(ProgressMode mode) {
   switch (mode) {
     case PROGRESS_FRACTION: return "Fraction";
     case PROGRESS_BAR: return "Bar";
-    case PROGRESS_OFF: return "Off";
+    case PROGRESS_OFF: return "None";
     default: return "Percent";
   }
 }
@@ -2248,7 +2254,12 @@ void cycleProgressMode() {
   // Only actually sweeps if the new mode is Fraction (see
   // refreshPageTracking()) -- otherwise switching away from Fraction and
   // back later would show whatever currentPageNumber/totalPageCount were
-  // last left at, possibly for a page you've since turned away from.
+  // last left at, possibly for a page you've since turned away from. That
+  // sweep is a real pagination replay (same cost class as indexChapters()
+  // opening a book) -- show a "Loading..." message first when it's about
+  // to run, or switching into Fraction on anything but a tiny book looks
+  // like the device has frozen.
+  if (progressMode == PROGRESS_FRACTION) showMessage("Loading...");
   refreshPageTracking(pageStart);
   renderSettings();
 }
@@ -2283,7 +2294,9 @@ void cycleTextSize() {
   applyBookFont((uint8_t)next);
   prefs.putUChar("bookFont", bookFont);
   // Page boundaries just shifted, so re-sweep for Fraction mode the same
-  // way cycleProgressMode() does -- a no-op unless that's the active mode.
+  // way cycleProgressMode() does -- a no-op unless that's the active mode,
+  // same "Loading..." reasoning as there too.
+  if (progressMode == PROGRESS_FRACTION) showMessage("Loading...");
   refreshPageTracking(pageStart);
   renderSettings();
 }
@@ -2704,7 +2717,7 @@ void setup() {
   autoTurnMs = prefs.getUInt("autoTurnMs", 0);
   invertDisplay = prefs.getBool("invert", false);
   sortMode = (SortMode)prefs.getUChar("sortMode", SORT_AZ);
-  progressMode = (ProgressMode)prefs.getUChar("progressMode", PROGRESS_PERCENT);
+  progressMode = (ProgressMode)prefs.getUChar("progressMode", PROGRESS_OFF);
   applyBookFont(prefs.getUChar("bookFont", 16));
 
   if (!LittleFS.begin(true)) {
