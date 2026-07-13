@@ -109,11 +109,11 @@ unsigned long lastPageTurnTime = 0;  // see maybeAutoTurn()
 bool invertDisplay = false;          // see toggleInvertDisplay(), applied in endFrame()
 enum SortMode : uint8_t { SORT_AZ, SORT_ZA, SORT_SIZE };
 SortMode sortMode = SORT_AZ;         // applied in listBooks() via sortBookList()
-// Reading-screen progress indicator (the corner text only -- the bottom
-// progress bar is a separate, always-on element, see drawProgressBar()).
-// PROGRESS_FRACTION shows "current chapter / total chapters", not a page
-// count -- see progressIndicatorText() for why.
-enum ProgressMode : uint8_t { PROGRESS_PERCENT, PROGRESS_FRACTION, PROGRESS_OFF };
+// Reading-screen progress indicator -- one of these four, never more than
+// one at a time (see renderPageAtCore()). PROGRESS_FRACTION shows "current
+// chapter / total chapters", not a page count -- see progressIndicatorText()
+// for why.
+enum ProgressMode : uint8_t { PROGRESS_PERCENT, PROGRESS_FRACTION, PROGRESS_BAR, PROGRESS_OFF };
 ProgressMode progressMode = PROGRESS_PERCENT;
 // Book count is bounded by flash space, not an arbitrary limit -- see
 // uploadSizeLimit in handleUpload(). MAX_BOOKS is just the bookList array's
@@ -1466,12 +1466,15 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
 // without touching "current place" (see openBookAtBookmark()) -- everything
 // except the savePosition() call at the end.
 
-// Text for the reading-screen progress indicator, per progressMode ("" for
-// PROGRESS_OFF). Fraction mode shows "current chapter / total chapters",
-// not a page count -- an accurate page-of-total would need a full-book
-// pagination sweep (there's no cheap way to get one; see the README).
+// Text for the reading-screen progress indicator, per progressMode -- ""
+// for PROGRESS_OFF and PROGRESS_BAR (the bar is drawn separately, see
+// drawProgressBar() and its call site in renderPageAtCore(), and is
+// mutually exclusive with the corner text). Fraction mode shows "current
+// chapter / total chapters", not a page count -- an accurate page-of-total
+// would need a full-book pagination sweep (there's no cheap way to get
+// one; see the README).
 String progressIndicatorText(uint32_t offset) {
-  if (progressMode == PROGRESS_OFF) return "";
+  if (progressMode == PROGRESS_OFF || progressMode == PROGRESS_BAR) return "";
   if (progressMode == PROGRESS_FRACTION) {
     uint16_t chapterIndex = 0;
     for (uint16_t i = 0; i < chapterCount; i++) {
@@ -1491,8 +1494,9 @@ String progressIndicatorText(uint32_t offset) {
 // (see the comment there), but the glyphs themselves are BOOK_FONT (16px)
 // tall against a BOOK_LINE_HEIGHT of 20px, so the last text row's own
 // glyphs end a few px above the bottom edge -- plenty of room for this
-// without eating a line. Always on regardless of progressMode -- that
-// setting only covers the corner text (see progressIndicatorText()).
+// without eating a line. Only drawn for progressMode == PROGRESS_BAR (see
+// call site in renderPageAtCore()) -- mutually exclusive with the corner
+// text modes, not layered with them.
 constexpr uint16_t PROGRESS_BAR_THICKNESS = 2;
 void drawProgressBar(uint32_t offset, size_t size) {
   if (size == 0) return;
@@ -1548,7 +1552,7 @@ void renderPageAtCore(uint32_t offset) {
     uint16_t indicatorY = BOOK_TOP_MARGIN + (lineCount - 1) * BOOK_LINE_HEIGHT;
     EPD_ShowString(indicatorX, indicatorY, indicator.c_str(), BLACK, BOOK_FONT);
   }
-  drawProgressBar(offset, fileSize);
+  if (progressMode == PROGRESS_BAR) drawProgressBar(offset, fileSize);
 
   endFrame();
 
@@ -1845,6 +1849,7 @@ String sortModeLabel(SortMode mode) {
 String progressModeLabel(ProgressMode mode) {
   switch (mode) {
     case PROGRESS_FRACTION: return "Fraction";
+    case PROGRESS_BAR: return "Bar";
     case PROGRESS_OFF: return "Off";
     default: return "Percent";
   }
@@ -1961,7 +1966,7 @@ void cycleSortMode() {
 }
 
 void cycleProgressMode() {
-  progressMode = (ProgressMode)((progressMode + 1) % 3);
+  progressMode = (ProgressMode)((progressMode + 1) % 4);
   prefs.putUChar("progressMode", progressMode);
   renderSettings();
 }
