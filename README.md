@@ -17,12 +17,12 @@ Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between ch
 - Reading progress indicator, one of four: percentage, page fraction, a thin bottom bar, or off. Percent/Fraction are tacked onto the end of the last line of text rather than their own row — the line trims back a whole word at a time to make genuine room when needed, rather than drawing over whatever was already there — so none of the four costs a line of reading space
 - Optional auto page turn (off by default) — reading becomes hands-free at a configurable interval
 - Home menu: 5 icons (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi / Settings) shown 3 at a time across two pages, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
-- Settings screen: auto-sleep timeout, auto page turn interval, invert display, book sort order, the progress indicator's format, and factory reset — see [Settings](#settings) below
+- Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn interval, invert display, book sort order, the progress indicator's format, and factory reset — see [Settings](#settings) below
 - Choose Book and the Bookmarks screen's book picker can sort A-Z, Z-A, or by file size
 - Delete a book from Choose Book, or a bookmark from the Bookmarks screen, via the same Yes/No confirmation dialog
 - Two QR codes on the Connect to Wi-Fi screen — one auto-joins the `PocketReader` network, one links out to the project — generated from PNGs with `tools/image_to_epd.py`
 - Wi-Fi only powers on while the Connect to Wi-Fi screen is open — off the rest of the time (including at boot) to save battery
-- Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity (adjustable in Settings), wakes on any button press
+- Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity (adjustable in Settings), wakes on any button press. Optionally escalates to a deeper, lower-power sleep tier after a further period of inactivity — see [Settings](#settings)
 
 ## Hardware
 
@@ -91,7 +91,8 @@ To use one, open the **Bookmarks** icon from Home, pick a book, then pick a slot
 
 Open the **Settings** icon from Home (it's on the second Home page -- see [Buttons](#hardware)). Dial up/down moves between options, dial press acts on the highlighted one. Everything here persists with the ESP32's own Preferences (NVS) library, not LittleFS, since it's device configuration rather than book data.
 
-- **Sleep timeout** -- cycles through 30 sec / 1 min / 2 min / 5 min / Never.
+- **Sleep timeout** -- cycles through 30 sec / 1 min / 2 min / 5 min / Never. Light sleep: near-instant to wake, on any button press.
+- **Deep sleep timeout** -- cycles through Off / 5 min / 10 min / 20 min / 30 min, off by default. If the device is *still* untouched this much longer after light sleep has already kicked in, it drops into a deeper sleep tier with much lower current draw. Waking from it takes a few seconds (it's a real reboot) instead of being instant, but it comes back up in the same book at the same page either way -- it just can't restore whatever other screen (Settings, Choose Book, etc.) happened to be open when it went down, since that only lives in RAM. If that's ever more annoying than useful, set it back to Off, or just raise the plain Sleep timeout instead so light sleep alone covers you.
 - **Auto-turn** -- cycles through Off / 15 sec / 30 sec / 1 min / 2 min. When enabled, the current page auto-advances once that long has passed since the last page change of any kind (a real page turn, a chapter jump, opening a book or bookmark) -- so it doesn't fire right after you've already moved. Stops naturally at the end of the book (`nextPage()` is already a no-op there).
 - **Invert** -- On/Off, black-on-white vs. white-on-black. Forces a full white-fill-and-clear refresh on the next redraw so the polarity flip doesn't ghost.
 - **Sort** -- cycles A-Z / Z-A / Size (largest first). Applies everywhere the library is listed: Choose Book, the Bookmarks screen's book picker, and the web upload page's library view, since they all go through the same `listBooks()`.

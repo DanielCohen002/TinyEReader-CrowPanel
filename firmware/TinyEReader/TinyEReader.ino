@@ -31,11 +31,16 @@
   - Home menu (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi /
     Settings) -- 5 items, shown 3 at a time as two pages (dial past the 3rd
     item to reach the other 2), see HOME_ITEM_COUNT below
-  - Settings screen: auto-sleep timeout, auto page turn, invert display,
-    book sort order, reading-progress indicator, and factory reset -- all
-    persisted with the ESP32's own Preferences/NVS storage, not LittleFS
-  - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
-    wakes on any button press
+  - Settings screen: auto-sleep timeout, deep-sleep timeout, auto page turn,
+    invert display, book sort order, reading-progress indicator, and factory
+    reset -- all persisted with the ESP32's own Preferences/NVS storage, not
+    LittleFS
+  - Light-sleeps the ESP32 and puts the e-paper panel to sleep after
+    inactivity, wakes instantly on any button press. Optionally (off by
+    default), if it's still untouched for a further stretch, drops into a
+    second, deeper sleep tier for much lower current draw -- wake from that
+    one takes a few seconds (a real reboot) instead of being instant, but
+    picks back up in the same book/page either way
 
   Display driver: EPD.h / EPD_Init.h / spi.h (bundled in this sketch folder).
   These are Elecrow's own driver files for this exact panel, pulled from their
@@ -101,6 +106,22 @@ constexpr size_t MAX_BOOK_SIZE = 3 * 1024 * 1024;
 uint32_t sleepAfterMs = 60000;
 const uint32_t SLEEP_PRESETS_MS[] = { 30000, 60000, 120000, 300000, 0 };
 constexpr uint8_t SLEEP_PRESETS_COUNT = 5;
+// Deep sleep is a second, optional tier past light sleep: once light-sleeping
+// (see maybeSleep()), if there's STILL no button press after this much
+// additional time, the ESP32 drops into a full deep sleep instead of staying
+// light-asleep indefinitely -- much lower current draw, at the cost of a
+// full reboot (a few seconds, vs. instant) to wake back up. 0 means "never
+// escalate," i.e. today's behavior: light-sleep forever until a button is
+// pressed. Off by default, same reasoning as autoTurnMs -- it changes
+// device behavior, so it should be opt-in.
+uint32_t deepSleepAfterMs = 0;
+const uint32_t DEEP_SLEEP_PRESETS_MS[] = { 0, 300000, 600000, 1200000, 1800000 };
+constexpr uint8_t DEEP_SLEEP_PRESETS_COUNT = 5;
+// How often maybeSleep() briefly wakes from light sleep on its own (no
+// button involved) to check whether the deepSleepAfterMs threshold has been
+// crossed yet. Only used while deepSleepAfterMs != 0 -- coarse on purpose,
+// this is just a polling interval, not user-facing.
+constexpr uint64_t DEEP_SLEEP_CHECK_INTERVAL_US = 30ULL * 1000000ULL;
 // Auto page turn: same idea as sleepAfterMs, 0 means "off". Reuses
 // sleepPresetLabel() for its "N sec"/"N min" formatting (see renderSettings()).
 uint32_t autoTurnMs = 0;
@@ -205,11 +226,12 @@ uint32_t bookmarkSlotPages[BOOKMARK_SLOT_COUNT];
 // LittleFS -- see setup() for the load and each cycle*()/toggle*() function
 // for the save.
 Preferences prefs;
-// 0 = sleep timeout, 1 = auto page turn, 2 = invert display, 3 = book sort,
-// 4 = progress indicator, 5 = factory reset. More items than fit on screen
-// at once now, so this scrolls the same way Choose Book does -- see
+// 0 = sleep timeout, 1 = deep sleep timeout, 2 = auto page turn,
+// 3 = invert display, 4 = book sort, 5 = progress indicator,
+// 6 = factory reset. More items than fit on screen at once now, so this
+// scrolls the same way Choose Book does -- see
 // SETTINGS_VISIBLE_ROWS/settingsWindowStart/scrollSettingsWindow().
-constexpr uint8_t SETTINGS_ITEM_COUNT = 6;
+constexpr uint8_t SETTINGS_ITEM_COUNT = 7;
 constexpr uint8_t SETTINGS_VISIBLE_ROWS = 5;
 uint8_t settingsSelection = 0;
 uint8_t settingsWindowStart = 0;
@@ -1981,10 +2003,11 @@ String progressModeLabel(ProgressMode mode) {
 String settingsItemLabel(uint8_t index) {
   switch (index) {
     case 0: return "Sleep: " + sleepPresetLabel(sleepAfterMs);
-    case 1: return "Auto-turn: " + ((autoTurnMs == 0) ? String("Off") : sleepPresetLabel(autoTurnMs));
-    case 2: return "Invert: " + String(invertDisplay ? "On" : "Off");
-    case 3: return "Sort: " + sortModeLabel(sortMode);
-    case 4: return "Progress: " + progressModeLabel(progressMode);
+    case 1: return "Deep sleep: " + ((deepSleepAfterMs == 0) ? String("Off") : sleepPresetLabel(deepSleepAfterMs));
+    case 2: return "Auto-turn: " + ((autoTurnMs == 0) ? String("Off") : sleepPresetLabel(autoTurnMs));
+    case 3: return "Invert: " + String(invertDisplay ? "On" : "Off");
+    case 4: return "Sort: " + sortModeLabel(sortMode);
+    case 5: return "Progress: " + progressModeLabel(progressMode);
     default: return "Factory reset";
   }
 }
@@ -2053,6 +2076,15 @@ uint32_t nextPreset(const uint32_t presets[], uint8_t count, uint32_t current) {
 void cycleSleepTimeout() {
   sleepAfterMs = nextPreset(SLEEP_PRESETS_MS, SLEEP_PRESETS_COUNT, sleepAfterMs);
   prefs.putUInt("sleepMs", sleepAfterMs);
+  renderSettings();
+}
+
+// Steps deepSleepAfterMs the same way -- see maybeSleep() for how this and
+// sleepAfterMs combine (deep sleep triggers at sleepAfterMs + deepSleepAfterMs
+// of total inactivity).
+void cycleDeepSleepTimeout() {
+  deepSleepAfterMs = nextPreset(DEEP_SLEEP_PRESETS_MS, DEEP_SLEEP_PRESETS_COUNT, deepSleepAfterMs);
+  prefs.putUInt("deepSleepMs", deepSleepAfterMs);
   renderSettings();
 }
 
@@ -2274,10 +2306,11 @@ void handleButtons() {
       if (dialPressTapped) {
         switch (settingsSelection) {
           case 0: cycleSleepTimeout(); break;
-          case 1: cycleAutoTurn(); break;
-          case 2: toggleInvertDisplay(); break;
-          case 3: cycleSortMode(); break;
-          case 4: cycleProgressMode(); break;
+          case 1: cycleDeepSleepTimeout(); break;
+          case 2: cycleAutoTurn(); break;
+          case 3: toggleInvertDisplay(); break;
+          case 4: cycleSortMode(); break;
+          case 5: cycleProgressMode(); break;
           default: enterConfirm(CONFIRM_FACTORY_RESET); break;
         }
       }
@@ -2350,7 +2383,32 @@ void maybeSleep() {
   uint64_t wakeMask = (1ULL << BTN_MENU) | (1ULL << BTN_BACK) | (1ULL << DIAL_DOWN) |
                       (1ULL << DIAL_UP) | (1ULL << DIAL_PRESS);
   esp_sleep_enable_ext1_wakeup(wakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
-  esp_light_sleep_start();
+
+  if (deepSleepAfterMs == 0) {
+    // Deep sleep escalation is off -- exactly today's behavior: block here
+    // (near-zero power draw while waiting) until a real button press wakes
+    // it, how ever long that takes.
+    esp_light_sleep_start();
+  } else {
+    // Also wake on a timer, purely to re-check the clock -- light sleep
+    // otherwise only wakes on a real button press, so without this there'd
+    // be no way to notice that deepSleepAfterMs has elapsed with nothing
+    // pressed. Loops back into light sleep each time the timer (not a
+    // button) is what woke it, until either a button is pressed (real
+    // activity -- fall through below like normal) or the combined
+    // sleepAfterMs + deepSleepAfterMs threshold is crossed, at which point
+    // it reboots into deep sleep instead (see setup() for the wake side of
+    // that -- deep sleep can't just "return" here like light sleep does).
+    uint32_t deepThresholdMs = sleepAfterMs + deepSleepAfterMs;
+    esp_sleep_enable_timer_wakeup(DEEP_SLEEP_CHECK_INTERVAL_US);
+    while (true) {
+      esp_light_sleep_start();
+      if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) break;
+      if (millis() - lastActivity >= deepThresholdMs) {
+        esp_deep_sleep_start();  // does not return
+      }
+    }
+  }
 
   touchActivity();
   if (wifiActive) {
@@ -2376,6 +2434,7 @@ void setup() {
 
   prefs.begin("settings", false);
   sleepAfterMs = prefs.getUInt("sleepMs", 60000);
+  deepSleepAfterMs = prefs.getUInt("deepSleepMs", 0);
   autoTurnMs = prefs.getUInt("autoTurnMs", 0);
   invertDisplay = prefs.getBool("invert", false);
   sortMode = (SortMode)prefs.getUChar("sortMode", SORT_AZ);
@@ -2399,14 +2458,29 @@ void setup() {
     currentBookName = (bookCount > 0) ? bookList[0] : "";
   }
 
-  // Loads/indexes the last book (if any) so Resume Last Book is instant,
-  // but boots to the Home screen rather than straight into reading.
+  // Loads/indexes the last book (if any) so Resume Last Book is instant.
   uint32_t saved = currentBookName.length() > 0 ? loadSavedPosition(currentBookName) : 0;
   reopenBookAt(saved);
   indexChapters();
   refreshPageTracking(saved);
-  currentScreen = SCREEN_HOME;
-  renderHome();
+  touchActivity();
+
+  // A real cold boot (power-on, reset, freshly flashed) lands on Home, same
+  // as always. But this reboot might instead be deep sleep waking back up
+  // (see maybeSleep()/cycleDeepSleepTimeout()) -- that's a real button
+  // press too (ESP_SLEEP_WAKEUP_EXT1, same wake source light sleep uses),
+  // just one that happens to require a reboot to act on. Landing on Home in
+  // that case would be a jarring change from how waking up always looked
+  // before deep sleep existed (light sleep never reboots, so it just
+  // resumes whatever screen was already showing) -- go straight back to
+  // reading instead, the same place Resume Last Book goes.
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1 && currentBookName.length() > 0) {
+    currentScreen = SCREEN_READING;
+    renderPageAt(pageStart);
+  } else {
+    currentScreen = SCREEN_HOME;
+    renderHome();
+  }
 }
 
 void loop() {
