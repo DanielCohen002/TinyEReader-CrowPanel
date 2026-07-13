@@ -109,6 +109,12 @@ unsigned long lastPageTurnTime = 0;  // see maybeAutoTurn()
 bool invertDisplay = false;          // see toggleInvertDisplay(), applied in endFrame()
 enum SortMode : uint8_t { SORT_AZ, SORT_ZA, SORT_SIZE };
 SortMode sortMode = SORT_AZ;         // applied in listBooks() via sortBookList()
+// Reading-screen progress indicator (the corner text only -- the bottom
+// progress bar is a separate, always-on element, see drawProgressBar()).
+// PROGRESS_FRACTION shows "current chapter / total chapters", not a page
+// count -- see progressIndicatorText() for why.
+enum ProgressMode : uint8_t { PROGRESS_PERCENT, PROGRESS_FRACTION, PROGRESS_OFF };
+ProgressMode progressMode = PROGRESS_PERCENT;
 // Book count is bounded by flash space, not an arbitrary limit -- see
 // uploadSizeLimit in handleUpload(). MAX_BOOKS is just the bookList array's
 // capacity (RAM, not flash), sized well past what could realistically fit
@@ -176,9 +182,14 @@ uint32_t bookmarkOffsets[BOOKMARK_SLOT_COUNT];
 // LittleFS -- see setup() for the load and each cycle*()/toggle*() function
 // for the save.
 Preferences prefs;
-// 0 = sleep timeout, 1 = auto page turn, 2 = invert display, 3 = book sort, 4 = factory reset
-constexpr uint8_t SETTINGS_ITEM_COUNT = 5;
+// 0 = sleep timeout, 1 = auto page turn, 2 = invert display, 3 = book sort,
+// 4 = progress indicator, 5 = factory reset. More items than fit on screen
+// at once now, so this scrolls the same way Choose Book does -- see
+// SETTINGS_VISIBLE_ROWS/settingsWindowStart/scrollSettingsWindow().
+constexpr uint8_t SETTINGS_ITEM_COUNT = 6;
+constexpr uint8_t SETTINGS_VISIBLE_ROWS = 5;
 uint8_t settingsSelection = 0;
+uint8_t settingsWindowStart = 0;
 
 String currentBookName;  // filename only, e.g. "MyNovel.txt" -- lives under /books/
 
@@ -1454,6 +1465,25 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
 // Split out from renderPageAt() so opening a book at a bookmark can render
 // without touching "current place" (see openBookAtBookmark()) -- everything
 // except the savePosition() call at the end.
+
+// Text for the reading-screen progress indicator, per progressMode ("" for
+// PROGRESS_OFF). Fraction mode shows "current chapter / total chapters",
+// not a page count -- an accurate page-of-total would need a full-book
+// pagination sweep (there's no cheap way to get one; see the README).
+String progressIndicatorText(uint32_t offset) {
+  if (progressMode == PROGRESS_OFF) return "";
+  if (progressMode == PROGRESS_FRACTION) {
+    uint16_t chapterIndex = 0;
+    for (uint16_t i = 0; i < chapterCount; i++) {
+      if (chapterOffsets[i] <= offset) chapterIndex = i;
+      else break;
+    }
+    return String(chapterIndex + 1) + "/" + String(chapterCount);
+  }
+  if (fileSize == 0) return "";
+  return String((uint8_t)(((uint64_t)offset * 100) / fileSize)) + "%";
+}
+
 // 1-2px progress bar hugging the very bottom edge of the screen, filled
 // proportionally to how far `offset` is through the file -- independent of
 // how many lines this particular page has, so it stays in a fixed spot.
@@ -1461,7 +1491,8 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
 // (see the comment there), but the glyphs themselves are BOOK_FONT (16px)
 // tall against a BOOK_LINE_HEIGHT of 20px, so the last text row's own
 // glyphs end a few px above the bottom edge -- plenty of room for this
-// without eating a line.
+// without eating a line. Always on regardless of progressMode -- that
+// setting only covers the corner text (see progressIndicatorText()).
 constexpr uint16_t PROGRESS_BAR_THICKNESS = 2;
 void drawProgressBar(uint32_t offset, size_t size) {
   if (size == 0) return;
@@ -1485,23 +1516,37 @@ void renderPageAtCore(uint32_t offset) {
   uint8_t lineCount = 0;
   pageEnd = computePageEnd(offset, lines, &lineCount);
 
+  // Progress indicator: actually make room for it on the last line rather
+  // than drawing on top of whatever's already there (which used to block
+  // real words) -- trim whole words off the end of that line, same 8px/char
+  // fixed glyph width as BOOK_CHARS_PER_LINE, until there's space, or leave
+  // it untouched if it was already short enough not to need any.
+  String indicator = (lineCount > 0) ? progressIndicatorText(offset) : "";
+  if (indicator.length() > 0) {
+    constexpr uint16_t INDICATOR_GAP = 8;
+    uint16_t indicatorWidth = indicator.length() * 8;
+    uint16_t usableWidth = EPD_W - 2 * BOOK_LEFT_MARGIN;
+    String& lastLine = lines[lineCount - 1];
+    while (lastLine.length() * 8 + INDICATOR_GAP + indicatorWidth > usableWidth) {
+      int lastSpace = lastLine.lastIndexOf(' ');
+      if (lastSpace < 0) {
+        lastLine = "";
+        break;
+      }
+      lastLine = lastLine.substring(0, lastSpace);
+    }
+  }
+
   beginFrame();
 
   for (uint8_t i = 0; i < lineCount; i++) {
     EPD_ShowString(BOOK_LEFT_MARGIN, BOOK_TOP_MARGIN + (i * BOOK_LINE_HEIGHT), lines[i].c_str(), BLACK, BOOK_FONT);
   }
 
-  // Progress indicator: a percentage tacked onto the end of the last
-  // visible line, like an extra trailing word, rather than reserving a
-  // line of its own -- if that line happens to run all the way to the
-  // right margin already, this can rarely overlap it; accepted trade-off
-  // of not costing a line. 8px/char is this font's fixed glyph width (see
-  // BOOK_CHARS_PER_LINE).
-  if (fileSize > 0 && lineCount > 0) {
-    String pctText = String((uint8_t)(((uint64_t)offset * 100) / fileSize)) + "%";
-    uint16_t pctX = EPD_W - BOOK_LEFT_MARGIN - (uint16_t)(pctText.length() * 8);
-    uint16_t pctY = BOOK_TOP_MARGIN + (lineCount - 1) * BOOK_LINE_HEIGHT;
-    EPD_ShowString(pctX, pctY, pctText.c_str(), BLACK, BOOK_FONT);
+  if (indicator.length() > 0) {
+    uint16_t indicatorX = EPD_W - BOOK_LEFT_MARGIN - (uint16_t)(indicator.length() * 8);
+    uint16_t indicatorY = BOOK_TOP_MARGIN + (lineCount - 1) * BOOK_LINE_HEIGHT;
+    EPD_ShowString(indicatorX, indicatorY, indicator.c_str(), BLACK, BOOK_FONT);
   }
   drawProgressBar(offset, fileSize);
 
@@ -1797,38 +1842,69 @@ String sortModeLabel(SortMode mode) {
   }
 }
 
+String progressModeLabel(ProgressMode mode) {
+  switch (mode) {
+    case PROGRESS_FRACTION: return "Fraction";
+    case PROGRESS_OFF: return "Off";
+    default: return "Percent";
+  }
+}
+
+// Label for settings row `index` (0..SETTINGS_ITEM_COUNT-1), without the
+// "> "/"  " selection prefix -- see renderSettings().
+String settingsItemLabel(uint8_t index) {
+  switch (index) {
+    case 0: return "Sleep: " + sleepPresetLabel(sleepAfterMs);
+    case 1: return "Auto-turn: " + ((autoTurnMs == 0) ? String("Off") : sleepPresetLabel(autoTurnMs));
+    case 2: return "Invert: " + String(invertDisplay ? "On" : "Off");
+    case 3: return "Sort: " + sortModeLabel(sortMode);
+    case 4: return "Progress: " + progressModeLabel(progressMode);
+    default: return "Factory reset";
+  }
+}
+
+// Keeps settingsSelection inside [settingsWindowStart, settingsWindowStart +
+// SETTINGS_VISIBLE_ROWS) -- same logic as scrollChooseWindow().
+void scrollSettingsWindow() {
+  if (settingsSelection < settingsWindowStart) {
+    settingsWindowStart = settingsSelection;
+  } else if (settingsSelection >= settingsWindowStart + SETTINGS_VISIBLE_ROWS) {
+    settingsWindowStart = settingsSelection - SETTINGS_VISIBLE_ROWS + 1;
+  }
+  constexpr uint8_t maxStart = SETTINGS_ITEM_COUNT - SETTINGS_VISIBLE_ROWS;
+  if (settingsWindowStart > maxStart) settingsWindowStart = maxStart;
+}
+
 // 6 rows is the max that fits this screen (MENU_TOP_MARGIN=4, MENU_LINE_HEIGHT=20,
-// 122px tall -- same limit as BOOK_MAX_LINES's math), so this is exactly full:
-// header + 5 selectable rows, no room left for anything else (e.g. a build-date
-// footer, which an earlier version of this screen had).
+// 122px tall -- same limit as BOOK_MAX_LINES's math): header + up to
+// SETTINGS_VISIBLE_ROWS items, scrolling for the rest (same ^/v hint
+// convention as renderChooseBook()) now that there are more items than fit
+// at once.
 void renderSettings() {
   beginFrame();
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "Settings", BLACK, MENU_FONT);
 
-  String sleepLabel = (settingsSelection == 0) ? "> Sleep: " : "  Sleep: ";
-  sleepLabel += sleepPresetLabel(sleepAfterMs);
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, sleepLabel.c_str(), BLACK, MENU_FONT);
+  String header = "Settings";
+  if (SETTINGS_ITEM_COUNT > SETTINGS_VISIBLE_ROWS) {
+    header += "  ";
+    header += (settingsWindowStart > 0) ? "^" : " ";
+    header += (settingsWindowStart + SETTINGS_VISIBLE_ROWS < SETTINGS_ITEM_COUNT) ? "v" : " ";
+  }
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, header.c_str(), BLACK, MENU_FONT);
 
-  String autoTurnLabel = (settingsSelection == 1) ? "> Auto-turn: " : "  Auto-turn: ";
-  autoTurnLabel += (autoTurnMs == 0) ? "Off" : sleepPresetLabel(autoTurnMs);
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, autoTurnLabel.c_str(), BLACK, MENU_FONT);
-
-  String invertLabel = (settingsSelection == 2) ? "> Invert: " : "  Invert: ";
-  invertLabel += invertDisplay ? "On" : "Off";
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 3 * MENU_LINE_HEIGHT, invertLabel.c_str(), BLACK, MENU_FONT);
-
-  String sortLabel = (settingsSelection == 3) ? "> Sort: " : "  Sort: ";
-  sortLabel += sortModeLabel(sortMode);
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, sortLabel.c_str(), BLACK, MENU_FONT);
-
-  String resetLabel = (settingsSelection == 4) ? "> Factory reset" : "  Factory reset";
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 5 * MENU_LINE_HEIGHT, resetLabel.c_str(), BLACK, MENU_FONT);
+  uint8_t windowEnd = min((uint8_t)(settingsWindowStart + SETTINGS_VISIBLE_ROWS), SETTINGS_ITEM_COUNT);
+  for (uint8_t i = settingsWindowStart; i < windowEnd; i++) {
+    uint8_t row = i - settingsWindowStart;
+    String label = (i == settingsSelection) ? "> " : "  ";
+    label += settingsItemLabel(i);
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (row + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+  }
 
   endFrame();
 }
 
 void enterSettings() {
   settingsSelection = 0;
+  settingsWindowStart = 0;
   currentScreen = SCREEN_SETTINGS;
   renderSettings();
 }
@@ -1881,6 +1957,12 @@ void toggleInvertDisplay() {
 void cycleSortMode() {
   sortMode = (SortMode)((sortMode + 1) % 3);
   prefs.putUChar("sortMode", sortMode);
+  renderSettings();
+}
+
+void cycleProgressMode() {
+  progressMode = (ProgressMode)((progressMode + 1) % 3);
+  prefs.putUChar("progressMode", progressMode);
   renderSettings();
 }
 
@@ -2055,10 +2137,12 @@ void handleButtons() {
     case SCREEN_SETTINGS:
       if (dialUpTapped) {
         settingsSelection = (settingsSelection + SETTINGS_ITEM_COUNT - 1) % SETTINGS_ITEM_COUNT;
+        scrollSettingsWindow();
         renderSettings();
       }
       if (dialDownTapped) {
         settingsSelection = (settingsSelection + 1) % SETTINGS_ITEM_COUNT;
+        scrollSettingsWindow();
         renderSettings();
       }
       if (dialPressTapped) {
@@ -2067,6 +2151,7 @@ void handleButtons() {
           case 1: cycleAutoTurn(); break;
           case 2: toggleInvertDisplay(); break;
           case 3: cycleSortMode(); break;
+          case 4: cycleProgressMode(); break;
           default: enterConfirm(CONFIRM_FACTORY_RESET); break;
         }
       }
@@ -2168,6 +2253,7 @@ void setup() {
   autoTurnMs = prefs.getUInt("autoTurnMs", 0);
   invertDisplay = prefs.getBool("invert", false);
   sortMode = (SortMode)prefs.getUChar("sortMode", SORT_AZ);
+  progressMode = (ProgressMode)prefs.getUChar("progressMode", PROGRESS_PERCENT);
 
   if (!LittleFS.begin(true)) {
     showMessage("LittleFS failed");
