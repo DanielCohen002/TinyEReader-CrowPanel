@@ -42,9 +42,11 @@
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after
     inactivity, wakes instantly on any button press. Optionally (off by
     default), if it's still untouched for a further stretch, drops into a
-    second, deeper sleep tier for much lower current draw -- wake from that
-    one takes a few seconds (a real reboot) instead of being instant, but
-    picks back up in the same book/page either way
+    second, deeper sleep tier for much lower current draw, after showing a
+    "TinyEReader / Deep sleep" splash so it's obvious at a glance that it's
+    really in that tier and not just light-sleeping -- wake from that one
+    takes a few seconds (a real reboot) instead of being instant, but picks
+    back up in the same book/page either way
 
   Display driver: EPD.h / EPD_Init.h / spi.h (bundled in this sketch folder).
   These are Elecrow's own driver files for this exact panel, pulled from their
@@ -924,6 +926,44 @@ void showMessage(const String& message) {
   }
 
   endFrame();
+}
+
+// Drawn right before the device actually drops into deep sleep (see
+// maybeSleep()) -- deliberately unmistakable for the ordinary reading
+// screen, since the whole point is being able to glance at it and know
+// it's really in the deep-sleep tier, not just light-sleeping (which
+// leaves whatever page was already showing untouched). The panel holds
+// this image with zero power for as long as it's down, same as it holds a
+// book page.
+//
+// By the time this is called, EPD_Sleep() has already put the panel itself
+// into its own low-power hold state (see maybeSleep()) -- forcing
+// epdNeedsFullInit here makes beginFrame() run a real EPD_Init(), which is
+// what actually wakes it back up to accept new image data, rather than
+// attempting a partial update against a now-stale reference frame. EPD_Sleep()
+// is called again afterward, once this frame is drawn, to put it right back
+// into that same low-power state for the actual duration of the sleep --
+// otherwise it'd sit at full power the whole time the ESP32 itself is in
+// deep sleep, which defeats a good chunk of the point.
+constexpr uint8_t DEEP_SLEEP_TITLE_FONT = 32;
+void renderDeepSleepSplash() {
+  epdNeedsFullInit = true;
+  beginFrame();
+
+  String title = "TinyEReader";
+  uint16_t titleWidth = title.length() * (DEEP_SLEEP_TITLE_FONT / 2);
+  uint16_t titleX = (EPD_W - titleWidth) / 2;
+  EPD_ShowString(titleX, 30, title.c_str(), BLACK, DEEP_SLEEP_TITLE_FONT);
+
+  String subtitle = "Deep sleep - press any button";
+  uint16_t subtitleWidth = subtitle.length() * (MENU_FONT / 2);
+  uint16_t subtitleX = (EPD_W - subtitleWidth) / 2;
+  EPD_ShowString(subtitleX, 76, subtitle.c_str(), BLACK, MENU_FONT);
+
+  endFrame();
+
+  EPD_Sleep();
+  epdNeedsFullInit = true;
 }
 
 // ---------------- LIBRARY ----------------
@@ -2476,6 +2516,7 @@ void maybeSleep() {
       esp_light_sleep_start();
       if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) break;
       if (millis() - lastActivity >= deepThresholdMs) {
+        renderDeepSleepSplash();
         esp_deep_sleep_start();  // does not return
       }
     }
