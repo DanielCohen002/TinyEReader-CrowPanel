@@ -15,8 +15,9 @@
     repeated/held presses don't redo that work) -- not an undo-last-jump
     stack, which would land on wherever you were before your last chapter
     skip instead
-  - Hold Top/Bottom while reading to auto-turn multiple pages instead of
-    tapping once per page
+  - Hold Top while reading to save/overwrite a bookmark (up to 3 per book,
+    separate from the automatic "current place" resume position -- see the
+    Bookmarks screen and BOOKMARK_HOLD_MS below)
   - Chapter skip (dial rotate while reading) using form-feed markers a book
     may contain -- see tools/epub_to_txt.py
   - Common "smart" typographic punctuation (curly quotes, em/en dashes,
@@ -27,8 +28,11 @@
     a forced line break, so hard-wrapped plain .txt ebooks (Project
     Gutenberg-style, one fixed-width source line per line) reflow to this
     screen's width instead of leaving a gap at every source line boundary
-  - Home menu (Resume Last Book / Choose Book / Connect to Wi-Fi), each
-    screen showing free space remaining out of the ~6.3MB library partition
+  - Home menu (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi /
+    Settings) -- 5 items, shown 3 at a time as two pages (dial past the 3rd
+    item to reach the other 2), see HOME_ITEM_COUNT below
+  - Settings screen: adjustable auto-sleep timeout and factory reset, both
+    persisted with the ESP32's own Preferences/NVS storage, not LittleFS
   - Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity,
     wakes on any button press
 
@@ -45,12 +49,15 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include "EPD.h"
 
 // 1-bit icon/QR bitmaps in EPD_ShowPicture's packed format, generated with
 // tools/image_to_epd.py from hand-drawn Piskel files and QR PNGs.
 #include "generated/icon_book.h"
 #include "generated/icon_bookshelf.h"
+#include "generated/icon_bookmark.h"
+#include "generated/icon_settings.h"
 #include "generated/icon_wifi.h"
 #include "generated/qr_wifi.h"
 #include "generated/qr_webpage.h"
@@ -58,14 +65,15 @@
 // ---------------- HARDWARE CONFIG ----------------
 // Button/dial pins per Elecrow's own examples (2.13_key.ino) and product wiki.
 //
-// While reading a book: top = previous page (hold to keep going), bottom =
-// next page (hold to keep going), dial up = previous chapter, dial down =
-// next chapter, dial press = Home.
+// While reading a book: top tap = previous page, top hold = save/overwrite a
+// bookmark (see BOOKMARK_HOLD_MS), bottom = next page, dial up = previous
+// chapter, dial down = next chapter, dial press = Home.
 //
-// Everywhere else (Home, Choose Book, Connect to Wi-Fi, the delete confirm
-// dialog): dial up/down = move selection, dial press = select, top = jump
-// straight to Home from anywhere (cancels the delete dialog without
-// deleting), bottom on a highlighted book in Choose Book opens a Yes/No
+// Everywhere else (Home, Choose Book, Bookmarks, Connect to Wi-Fi, Settings,
+// the delete/reset confirm dialog): dial up/down = move selection, dial
+// press = select, top = jump straight to Home from anywhere (cancels the
+// confirm dialog without acting), bottom on a highlighted book in Choose
+// Book or a highlighted bookmark in the Bookmarks screen opens a Yes/No
 // delete confirmation.
 #define BTN_MENU     2   // top button
 #define BTN_BACK     1   // bottom button
@@ -86,7 +94,12 @@ const char* AP_PASS = "12345678";
 // stops one absurdly large file from being accepted. See partitions.csv:
 // the LittleFS partition is sized at ~6.3MB of the board's 8MB flash.
 constexpr size_t MAX_BOOK_SIZE = 3 * 1024 * 1024;
-constexpr uint32_t SLEEP_AFTER_MS = 60000;
+// Auto-sleep timeout is now a Settings-screen option (see cycleSleepTimeout()
+// and SLEEP_PRESETS_MS below), persisted via Preferences -- sleepAfterMs is
+// the live value, loaded from storage in setup(). 0 means "never sleep".
+uint32_t sleepAfterMs = 60000;
+const uint32_t SLEEP_PRESETS_MS[] = { 30000, 60000, 120000, 300000, 0 };
+constexpr uint8_t SLEEP_PRESETS_COUNT = 5;
 // Book count is bounded by flash space, not an arbitrary limit -- see
 // uploadSizeLimit in handleUpload(). MAX_BOOKS is just the bookList array's
 // capacity (RAM, not flash), sized well past what could realistically fit
@@ -94,8 +107,7 @@ constexpr uint32_t SLEEP_AFTER_MS = 60000;
 // screen only fits CHOOSE_VISIBLE_ROWS at a time and scrolls to show more.
 constexpr uint8_t MAX_BOOKS = 64;
 constexpr uint8_t CHOOSE_VISIBLE_ROWS = 5;  // one row is a free-space header, see renderChooseBook()
-constexpr unsigned long PAGE_REPEAT_DELAY_MS = 500;     // hold Top/Bottom this long to start auto-paging
-constexpr unsigned long PAGE_REPEAT_INTERVAL_MS = 300;  // then advance one page this often while held
+constexpr unsigned long BOOKMARK_HOLD_MS = 600;  // hold Top this long while reading to save a bookmark
 
 // Book text layout (8x16 font). 6 lines is the max that fits at all: the
 // 12x24 font this used to be set to is exactly 24px tall, and 6 * 24 = 144
@@ -116,10 +128,20 @@ constexpr uint8_t MENU_FONT = 16;
 
 WebServer server(80);
 
-enum AppScreen : uint8_t { SCREEN_READING, SCREEN_HOME, SCREEN_CHOOSE_BOOK, SCREEN_WIFI_INFO, SCREEN_CONFIRM_DELETE };
+enum AppScreen : uint8_t {
+  SCREEN_READING, SCREEN_HOME, SCREEN_CHOOSE_BOOK, SCREEN_WIFI_INFO, SCREEN_CONFIRM_DELETE,
+  SCREEN_BOOKMARK_BOOKS, SCREEN_BOOKMARK_SLOTS, SCREEN_SETTINGS
+};
 AppScreen currentScreen = SCREEN_READING;
 
-constexpr uint8_t HOME_ITEM_COUNT = 3;
+// renderConfirmDelete()/SCREEN_CONFIRM_DELETE is shared by all three
+// destructive-or-impactful actions in the app (book deletion, bookmark
+// deletion, factory reset) rather than having three near-identical Yes/No
+// screens -- confirmAction picks which prompt/action applies.
+enum ConfirmAction : uint8_t { CONFIRM_DELETE_BOOK, CONFIRM_DELETE_BOOKMARK, CONFIRM_FACTORY_RESET };
+ConfirmAction confirmAction = CONFIRM_DELETE_BOOK;
+
+constexpr uint8_t HOME_ITEM_COUNT = 5;
 uint8_t homeSelection = 0;
 
 String bookList[MAX_BOOKS];
@@ -127,7 +149,26 @@ uint8_t bookCount = 0;
 uint8_t bookFileTotal = 0;  // like bookCount but not capped at MAX_BOOKS -- see listBooks()
 uint8_t chooseSelection = 0;
 uint8_t chooseWindowStart = 0;  // first bookList index shown on screen, see scrollChooseWindow()
-bool confirmDeleteYes = false;  // which option is highlighted in the delete dialog; defaults to No
+bool confirmDeleteYes = false;  // which option is highlighted in the confirm dialog; defaults to No
+
+// Bookmarks screen state: bookmarkBookSelection/bookmarkWindowStart pick
+// which book's bookmarks to view (own scroll state, separate from Choose
+// Book's, since either screen can be entered independently from Home).
+// bookmarkOffsets is loaded fresh from disk (see loadBookmarks()) whenever
+// SCREEN_BOOKMARK_SLOTS is entered, and written back on save/delete.
+uint8_t bookmarkBookSelection = 0;
+uint8_t bookmarkWindowStart = 0;
+uint8_t bookmarkSlotSelection = 0;
+constexpr uint8_t BOOKMARK_SLOT_COUNT = 3;
+constexpr uint32_t BOOKMARK_EMPTY = 0xFFFFFFFF;
+uint32_t bookmarkOffsets[BOOKMARK_SLOT_COUNT];
+
+// Settings screen state. Persisted settings (currently just the sleep
+// timeout) live in NVS via Preferences, not LittleFS -- see setup() for the
+// load and cycleSleepTimeout() for the save.
+Preferences prefs;
+constexpr uint8_t SETTINGS_ITEM_COUNT = 2;  // 0 = sleep timeout, 1 = factory reset
+uint8_t settingsSelection = 0;
 
 String currentBookName;  // filename only, e.g. "MyNovel.txt" -- lives under /books/
 
@@ -687,6 +728,37 @@ String posPath(const String& name) {
   return "/books/" + name + ".pos";
 }
 
+String bookmarkPath(const String& name) {
+  return "/books/" + name + ".bm";
+}
+
+// Bookmarks file is BOOKMARK_SLOT_COUNT lines, each either a decimal byte
+// offset or blank for an unused slot -- deliberately separate from posPath()
+// ("current place"), which is the automatic resume position and must never
+// be touched by bookmark save/jump/delete (see saveBookmark(),
+// openBookAtBookmark()).
+void loadBookmarks(const String& name, uint32_t offsets[BOOKMARK_SLOT_COUNT]) {
+  for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) offsets[i] = BOOKMARK_EMPTY;
+  File f = LittleFS.open(bookmarkPath(name), "r");
+  if (!f) return;
+  for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT && f.available(); i++) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) offsets[i] = (uint32_t)line.toInt();
+  }
+  f.close();
+}
+
+void saveBookmarks(const String& name, const uint32_t offsets[BOOKMARK_SLOT_COUNT]) {
+  File f = LittleFS.open(bookmarkPath(name), "w");
+  if (!f) return;
+  for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
+    if (offsets[i] != BOOKMARK_EMPTY) f.println(offsets[i]);
+    else f.println();
+  }
+  f.close();
+}
+
 // Filenames always end in ".txt" (see sanitizeFilename()) -- strip it for
 // display purposes so messages read as a title, not a filename.
 String bookTitle(const String& name) {
@@ -812,7 +884,7 @@ void listBooks() {
     String name = String(f.name());
     int slash = name.lastIndexOf('/');
     if (slash != -1) name = name.substring(slash + 1);
-    if (name.length() > 0 && !name.endsWith(".pos")) {
+    if (name.length() > 0 && !name.endsWith(".pos") && !name.endsWith(".bm")) {
       if (bookCount < MAX_BOOKS) bookList[bookCount++] = name;
       bookFileTotal++;
     }
@@ -836,6 +908,7 @@ bool deleteBookFile(const String& name) {
 
   LittleFS.remove(bookPath(name));
   LittleFS.remove(posPath(name));
+  LittleFS.remove(bookmarkPath(name));
   return true;
 }
 
@@ -854,6 +927,7 @@ void deleteSelectedBook() {
 }
 
 void renderPageAt(uint32_t offset);
+void renderPageAtCore(uint32_t offset);
 
 // Scans the whole book once for form-feed chapter markers and records their
 // byte offsets. Called once per book-open, not per page -- a full linear
@@ -912,6 +986,51 @@ void openBook(const String& name) {
   indexChapters();
   currentScreen = SCREEN_READING;
   renderPageAt(saved);
+}
+
+// Like openBook(), but opens at an explicit bookmark offset instead of the
+// saved "current place" -- and deliberately uses renderPageAtCore() instead
+// of renderPageAt() so jumping to a bookmark does NOT overwrite "current
+// place". If you keep reading forward/back from here, normal page turns
+// call renderPageAt() as usual and current place starts tracking again.
+void openBookAtBookmark(const String& name, uint32_t offset) {
+  String title = bookTitle(name);
+  if (title.length() > 18) title = title.substring(0, 15) + "...";
+  showMessage("Opening " + title);
+
+  currentBookName = name;
+  saveCurrentBookName();
+  reopenBookAt(offset);
+  indexChapters();
+  currentScreen = SCREEN_READING;
+  renderPageAtCore(offset);
+}
+
+// Saves/overwrites a bookmark at the current reading position: fills the
+// first empty slot, or overwrites slot 1 if all three are already used.
+// Triggered by holding Top for BOOKMARK_HOLD_MS while reading (see
+// pollButtons()). Flashes a confirmation message, then redraws the page
+// that was already on screen -- a blocking pause here is consistent with
+// how showMessage() is already used elsewhere (e.g. "Opening <title>").
+void saveBookmark() {
+  if (currentBookName.length() == 0) return;
+
+  uint32_t offsets[BOOKMARK_SLOT_COUNT];
+  loadBookmarks(currentBookName, offsets);
+
+  uint8_t slot = 0;  // falls back to overwriting slot 1 if none are empty
+  for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
+    if (offsets[i] == BOOKMARK_EMPTY) {
+      slot = i;
+      break;
+    }
+  }
+  offsets[slot] = pageStart;
+  saveBookmarks(currentBookName, offsets);
+
+  showMessage("Bookmark " + String(slot + 1) + " saved");
+  delay(900);
+  renderPageAtCore(pageStart);
 }
 
 // ---------------- WIFI + WEB ----------------
@@ -996,6 +1115,7 @@ void handleUpload() {
     }
 
     if (LittleFS.exists(posPath(uploadName))) LittleFS.remove(posPath(uploadName));
+    if (LittleFS.exists(bookmarkPath(uploadName))) LittleFS.remove(bookmarkPath(uploadName));
     incoming = LittleFS.open(bookPath(uploadName), "w");
   }
 
@@ -1272,7 +1392,10 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
   return previousStart;
 }
 
-void renderPageAt(uint32_t offset) {
+// Split out from renderPageAt() so opening a book at a bookmark can render
+// without touching "current place" (see openBookAtBookmark()) -- everything
+// except the savePosition() call at the end.
+void renderPageAtCore(uint32_t offset) {
   reopenBookAt(offset);
   if (!book) {
     showMessage("Book open failed");
@@ -1291,8 +1414,12 @@ void renderPageAt(uint32_t offset) {
 
   endFrame();
 
-  savePosition();
   touchActivity();
+}
+
+void renderPageAt(uint32_t offset) {
+  renderPageAtCore(offset);
+  savePosition();
 }
 
 void nextPage() {
@@ -1306,22 +1433,35 @@ void previousPage() {
 }
 
 // ---------------- MENUS ----------------
-const uint8_t* HOME_ICONS[] = { iconBook, iconBookshelf, iconWifi };
-const char* HOME_SHORT_LABELS[] = { "Read", "Books", "Wi-Fi" };
+const uint8_t* HOME_ICONS[HOME_ITEM_COUNT] = { iconBook, iconBookshelf, iconBookmark, iconWifi, iconSettings };
+const char* HOME_SHORT_LABELS[HOME_ITEM_COUNT] = { "Read", "Books", "Marks", "Wi-Fi", "Setup" };
 
-// Icon-first layout: a row of three 32x32 icons with a small label under
+// Icon-first layout: a row of three 48x48 icons with a small label under
 // each, centered as a block in the 250x122 screen, selection shown as a
 // border box rather than a "> " prefix (there's no list to prefix here).
+// 5 items don't fit in one row at this icon size, so they're split into two
+// pages of up to HOME_ICONS_PER_PAGE icons each -- dialing past the last
+// item of page 0 moves into page 1 and vice versa (see the modular
+// arithmetic in SCREEN_HOME's dial handling in pollButtons(), which is
+// already generic over HOME_ITEM_COUNT and needed no changes for this).
 constexpr uint16_t HOME_ICON_SIZE = 48;
 constexpr uint16_t HOME_ICON_Y = 30;
 constexpr uint8_t HOME_LABEL_FONT = 12;  // 6x12 -- deliberately small/secondary to the icon
 constexpr uint16_t HOME_LABEL_Y = HOME_ICON_Y + HOME_ICON_SIZE + 4;
-const uint16_t HOME_ICON_X[HOME_ITEM_COUNT] = { 26, 100, 174 };  // evenly spaced, symmetric margins
+constexpr uint8_t HOME_ICONS_PER_PAGE = 3;
+const uint16_t HOME_PAGE0_X[HOME_ICONS_PER_PAGE] = { 26, 100, 174 };  // evenly spaced, symmetric margins
+const uint16_t HOME_PAGE1_X[HOME_ITEM_COUNT - HOME_ICONS_PER_PAGE] = { 64, 138 };  // centered pair, same spacing rhythm as page 0
 
 void renderHome() {
   beginFrame();
-  for (uint8_t i = 0; i < HOME_ITEM_COUNT; i++) {
-    uint16_t x = HOME_ICON_X[i];
+  bool page1 = homeSelection >= HOME_ICONS_PER_PAGE;
+  uint8_t startIdx = page1 ? HOME_ICONS_PER_PAGE : 0;
+  uint8_t count = page1 ? (HOME_ITEM_COUNT - HOME_ICONS_PER_PAGE) : HOME_ICONS_PER_PAGE;
+  const uint16_t* xs = page1 ? HOME_PAGE1_X : HOME_PAGE0_X;
+
+  for (uint8_t slot = 0; slot < count; slot++) {
+    uint8_t i = startIdx + slot;
+    uint16_t x = xs[slot];
     EPD_ShowPicture(x, HOME_ICON_Y, HOME_ICON_SIZE, HOME_ICON_SIZE, HOME_ICONS[i], BLACK);
 
     const char* label = HOME_SHORT_LABELS[i];
@@ -1381,17 +1521,123 @@ void renderChooseBook() {
   endFrame();
 }
 
-// Top/Bottom and dial up/down all move the Yes/No highlight here (same
-// up/down convention as every other screen); dial press confirms whichever
-// is highlighted. Defaults to No so nothing destructive happens unless the
-// user deliberately moves to Yes and confirms.
+// Keeps bookmarkBookSelection inside [bookmarkWindowStart, bookmarkWindowStart
+// + CHOOSE_VISIBLE_ROWS) -- same logic as scrollChooseWindow(), kept as a
+// separate function/state rather than reusing chooseWindowStart so the two
+// screens' scroll positions don't interfere with each other.
+void scrollBookmarkWindow() {
+  if (bookmarkBookSelection < bookmarkWindowStart) {
+    bookmarkWindowStart = bookmarkBookSelection;
+  } else if (bookmarkBookSelection >= bookmarkWindowStart + CHOOSE_VISIBLE_ROWS) {
+    bookmarkWindowStart = bookmarkBookSelection - CHOOSE_VISIBLE_ROWS + 1;
+  }
+  uint8_t maxStart = (bookCount > CHOOSE_VISIBLE_ROWS) ? bookCount - CHOOSE_VISIBLE_ROWS : 0;
+  if (bookmarkWindowStart > maxStart) bookmarkWindowStart = maxStart;
+}
+
+// Book picker for the Bookmarks screen -- same layout as renderChooseBook()
+// but dial press moves into SCREEN_BOOKMARK_SLOTS for the highlighted book
+// instead of opening it directly (see enterBookmarkSlots()).
+void renderBookmarkBooks() {
+  beginFrame();
+  String header = "Bookmarks";
+  if (bookCount > CHOOSE_VISIBLE_ROWS) {
+    header += "  ";
+    header += (bookmarkWindowStart > 0) ? "^" : " ";
+    header += (bookmarkWindowStart + CHOOSE_VISIBLE_ROWS < bookCount) ? "v" : " ";
+  }
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, header.c_str(), BLACK, MENU_FONT);
+
+  if (bookCount == 0) {
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, "No books yet.", BLACK, MENU_FONT);
+  } else {
+    uint8_t windowEnd = min((uint8_t)(bookmarkWindowStart + CHOOSE_VISIBLE_ROWS), bookCount);
+    for (uint8_t i = bookmarkWindowStart; i < windowEnd; i++) {
+      uint8_t row = i - bookmarkWindowStart;
+      String label = (i == bookmarkBookSelection) ? "> " : "  ";
+      String name = bookList[i];
+      if (name.length() > 26) name = name.substring(0, 23) + "...";
+      label += name;
+      EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (row + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+    }
+  }
+  endFrame();
+}
+
+void enterBookmarkBooks() {
+  listBooks();
+  bookmarkBookSelection = 0;
+  bookmarkWindowStart = 0;
+  currentScreen = SCREEN_BOOKMARK_BOOKS;
+  renderBookmarkBooks();
+}
+
+void renderBookmarkSlots() {
+  beginFrame();
+  String title = bookTitle(bookList[bookmarkBookSelection]);
+  if (title.length() > 26) title = title.substring(0, 23) + "...";
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, title.c_str(), BLACK, MENU_FONT);
+
+  // Percent-through-book is cheap (just the file size, no full scan) and
+  // more useful at a glance here than a raw byte offset.
+  File f = LittleFS.open(bookPath(bookList[bookmarkBookSelection]), "r");
+  size_t size = f ? f.size() : 0;
+  if (f) f.close();
+
+  for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
+    String label = (i == bookmarkSlotSelection) ? "> " : "  ";
+    label += String(i + 1) + ": ";
+    if (bookmarkOffsets[i] == BOOKMARK_EMPTY) {
+      label += "(empty)";
+    } else {
+      uint8_t pct = (size > 0) ? (uint8_t)(((uint64_t)bookmarkOffsets[i] * 100) / size) : 0;
+      label += String(pct) + "%";
+    }
+    EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + (i + 1) * MENU_LINE_HEIGHT, label.c_str(), BLACK, MENU_FONT);
+  }
+  endFrame();
+}
+
+void enterBookmarkSlots() {
+  loadBookmarks(bookList[bookmarkBookSelection], bookmarkOffsets);
+  bookmarkSlotSelection = 0;
+  currentScreen = SCREEN_BOOKMARK_SLOTS;
+  renderBookmarkSlots();
+}
+
+void deleteSelectedBookmark() {
+  bookmarkOffsets[bookmarkSlotSelection] = BOOKMARK_EMPTY;
+  saveBookmarks(bookList[bookmarkBookSelection], bookmarkOffsets);
+  renderBookmarkSlots();
+}
+
+// Shared by book deletion, bookmark deletion, and factory reset -- see
+// ConfirmAction. Top/Bottom and dial up/down all move the Yes/No highlight
+// (same up/down convention as every other screen); dial press confirms
+// whichever is highlighted. Defaults to No so nothing destructive happens
+// unless the user deliberately moves to Yes and confirms.
 void renderConfirmDelete() {
   beginFrame();
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "Delete this book?", BLACK, MENU_FONT);
 
-  String name = (chooseSelection < bookCount) ? bookList[chooseSelection] : "";
-  if (name.length() > 26) name = name.substring(0, 23) + "...";
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, name.c_str(), BLACK, MENU_FONT);
+  String prompt, detail;
+  switch (confirmAction) {
+    case CONFIRM_DELETE_BOOK:
+      prompt = "Delete this book?";
+      detail = (chooseSelection < bookCount) ? bookList[chooseSelection] : "";
+      break;
+    case CONFIRM_DELETE_BOOKMARK:
+      prompt = "Delete this bookmark?";
+      detail = bookTitle(bookList[bookmarkBookSelection]) + " #" + String(bookmarkSlotSelection + 1);
+      break;
+    case CONFIRM_FACTORY_RESET:
+      prompt = "Factory reset?";
+      detail = "Erases ALL books & settings";
+      break;
+  }
+  if (detail.length() > 26) detail = detail.substring(0, 23) + "...";
+
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, prompt.c_str(), BLACK, MENU_FONT);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, detail.c_str(), BLACK, MENU_FONT);
 
   String yesLabel = confirmDeleteYes ? "> Yes" : "  Yes";
   String noLabel = !confirmDeleteYes ? "> No" : "  No";
@@ -1401,7 +1647,8 @@ void renderConfirmDelete() {
   endFrame();
 }
 
-void enterConfirmDelete() {
+void enterConfirm(ConfirmAction action) {
+  confirmAction = action;
   confirmDeleteYes = false;
   currentScreen = SCREEN_CONFIRM_DELETE;
   renderConfirmDelete();
@@ -1440,6 +1687,65 @@ void exitWifiInfo() {
   WiFi.mode(WIFI_OFF);
 }
 
+// Returns a short human label for a SLEEP_PRESETS_MS entry, e.g. "1 min" or
+// "Never" for the 0 sentinel.
+String sleepPresetLabel(uint32_t ms) {
+  if (ms == 0) return "Never";
+  if (ms < 60000) return String(ms / 1000) + " sec";
+  return String(ms / 60000) + " min";
+}
+
+void renderSettings() {
+  beginFrame();
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "Settings", BLACK, MENU_FONT);
+
+  String sleepLabel = (settingsSelection == 0) ? "> Sleep: " : "  Sleep: ";
+  sleepLabel += sleepPresetLabel(sleepAfterMs);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, sleepLabel.c_str(), BLACK, MENU_FONT);
+
+  String resetLabel = (settingsSelection == 1) ? "> Factory reset" : "  Factory reset";
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, resetLabel.c_str(), BLACK, MENU_FONT);
+
+  String buildLabel = "Build: " + String(__DATE__);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, buildLabel.c_str(), BLACK, MENU_FONT);
+
+  endFrame();
+}
+
+void enterSettings() {
+  settingsSelection = 0;
+  currentScreen = SCREEN_SETTINGS;
+  renderSettings();
+}
+
+// Steps sleepAfterMs to the next SLEEP_PRESETS_MS entry (wrapping) and
+// persists it -- Preferences/NVS, not LittleFS, since it's device
+// configuration rather than book data (see the global `prefs`/setup()).
+void cycleSleepTimeout() {
+  uint8_t index = 0;
+  for (uint8_t i = 0; i < SLEEP_PRESETS_COUNT; i++) {
+    if (SLEEP_PRESETS_MS[i] == sleepAfterMs) {
+      index = i;
+      break;
+    }
+  }
+  index = (index + 1) % SLEEP_PRESETS_COUNT;
+  sleepAfterMs = SLEEP_PRESETS_MS[index];
+  prefs.putUInt("sleepMs", sleepAfterMs);
+  renderSettings();
+}
+
+// Wipes the entire LittleFS partition (all books, positions, bookmarks) and
+// the Preferences/NVS namespace (settings), then reboots -- there's no
+// "undo" screen for this, only the Yes/No confirm in renderConfirmDelete().
+void factoryReset() {
+  showMessage("Resetting...");
+  LittleFS.format();
+  prefs.clear();
+  delay(300);
+  ESP.restart();
+}
+
 void enterHome() {
   currentScreen = SCREEN_HOME;
   homeSelection = 0;
@@ -1461,8 +1767,14 @@ void selectHomeItem() {
       currentScreen = SCREEN_CHOOSE_BOOK;
       renderChooseBook();
       break;
-    case 2:  // Connect to Wi-Fi
+    case 2:  // Bookmarks
+      enterBookmarkBooks();
+      break;
+    case 3:  // Connect to Wi-Fi
       enterWifiInfo();
+      break;
+    case 4:  // Settings
+      enterSettings();
       break;
   }
 }
@@ -1475,9 +1787,7 @@ void handleButtons() {
   static bool lastDialUp = false;
   static bool lastDialPress = false;
   static unsigned long menuHoldStart = 0;
-  static unsigned long menuLastRepeat = 0;
-  static unsigned long backHoldStart = 0;
-  static unsigned long backLastRepeat = 0;
+  static bool menuHoldFired = false;
 
   bool nowMenu = pressed(BTN_MENU);
   bool nowBack = pressed(BTN_BACK);
@@ -1486,42 +1796,36 @@ void handleButtons() {
   bool nowDialPress = pressed(DIAL_PRESS);
 
   bool menuTapped = nowMenu && !lastMenu;
+  bool menuReleased = !nowMenu && lastMenu;
   bool backTapped = nowBack && !lastBack;
   bool dialDownTapped = nowDialDown && !lastDialDown;
   bool dialUpTapped = nowDialUp && !lastDialUp;
   bool dialPressTapped = nowDialPress && !lastDialPress;
 
-  // Holding Top or Bottom past PAGE_REPEAT_DELAY_MS starts auto-turning
-  // pages every PAGE_REPEAT_INTERVAL_MS until released, so you can hold to
-  // skip several pages instead of tapping once per page. Only meaningful
-  // in SCREEN_READING (see below), but harmless to track unconditionally.
+  // Top's tap action (previousPage in SCREEN_READING, Home everywhere else)
+  // can't fire on the press edge like every other button here, since a tap
+  // and the start of a hold look identical until BOOKMARK_HOLD_MS has
+  // passed -- so SCREEN_READING alone waits for either the hold threshold
+  // (menuHoldTriggered, fires once, still held) or a release before that
+  // threshold (menuShortRelease). Every other screen keeps using menuTapped
+  // instantly on press, unaffected by any of this.
   if (menuTapped) {
     menuHoldStart = millis();
-    menuLastRepeat = millis();
+    menuHoldFired = false;
   }
-  bool menuRepeat = nowMenu && !menuTapped &&
-                     millis() - menuHoldStart >= PAGE_REPEAT_DELAY_MS &&
-                     millis() - menuLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
-  if (menuRepeat) menuLastRepeat = millis();
+  bool menuHoldTriggered = nowMenu && !menuHoldFired && millis() - menuHoldStart >= BOOKMARK_HOLD_MS;
+  if (menuHoldTriggered) menuHoldFired = true;
+  bool menuShortRelease = menuReleased && !menuHoldFired;
 
-  if (backTapped) {
-    backHoldStart = millis();
-    backLastRepeat = millis();
-  }
-  bool backRepeat = nowBack && !backTapped &&
-                     millis() - backHoldStart >= PAGE_REPEAT_DELAY_MS &&
-                     millis() - backLastRepeat >= PAGE_REPEAT_INTERVAL_MS;
-  if (backRepeat) backLastRepeat = millis();
-
-  if (menuTapped || backTapped || dialDownTapped || dialUpTapped || dialPressTapped ||
-      menuRepeat || backRepeat) {
+  if (menuTapped || backTapped || dialDownTapped || dialUpTapped || dialPressTapped || menuHoldTriggered) {
     touchActivity();
   }
 
   switch (currentScreen) {
     case SCREEN_READING:
-      if (menuTapped || menuRepeat) previousPage();
-      if (backTapped || backRepeat) nextPage();
+      if (menuShortRelease) previousPage();
+      if (menuHoldTriggered) saveBookmark();
+      if (backTapped) nextPage();
       if (dialUpTapped) previousChapter();
       if (dialDownTapped) nextChapter();
       if (dialPressTapped) enterHome();
@@ -1552,7 +1856,42 @@ void handleButtons() {
           renderChooseBook();
         }
         if (dialPressTapped) openBook(bookList[chooseSelection]);
-        if (backTapped) enterConfirmDelete();
+        if (backTapped) enterConfirm(CONFIRM_DELETE_BOOK);
+      }
+      if (menuTapped) enterHome();
+      break;
+
+    case SCREEN_BOOKMARK_BOOKS:
+      if (bookCount > 0) {
+        if (dialUpTapped) {
+          bookmarkBookSelection = (bookmarkBookSelection + bookCount - 1) % bookCount;
+          scrollBookmarkWindow();
+          renderBookmarkBooks();
+        }
+        if (dialDownTapped) {
+          bookmarkBookSelection = (bookmarkBookSelection + 1) % bookCount;
+          scrollBookmarkWindow();
+          renderBookmarkBooks();
+        }
+        if (dialPressTapped) enterBookmarkSlots();
+      }
+      if (menuTapped) enterHome();
+      break;
+
+    case SCREEN_BOOKMARK_SLOTS:
+      if (dialUpTapped) {
+        bookmarkSlotSelection = (bookmarkSlotSelection + BOOKMARK_SLOT_COUNT - 1) % BOOKMARK_SLOT_COUNT;
+        renderBookmarkSlots();
+      }
+      if (dialDownTapped) {
+        bookmarkSlotSelection = (bookmarkSlotSelection + 1) % BOOKMARK_SLOT_COUNT;
+        renderBookmarkSlots();
+      }
+      if (dialPressTapped && bookmarkOffsets[bookmarkSlotSelection] != BOOKMARK_EMPTY) {
+        openBookAtBookmark(bookList[bookmarkBookSelection], bookmarkOffsets[bookmarkSlotSelection]);
+      }
+      if (backTapped && bookmarkOffsets[bookmarkSlotSelection] != BOOKMARK_EMPTY) {
+        enterConfirm(CONFIRM_DELETE_BOOKMARK);
       }
       if (menuTapped) enterHome();
       break;
@@ -1562,6 +1901,22 @@ void handleButtons() {
         exitWifiInfo();
         enterHome();
       }
+      break;
+
+    case SCREEN_SETTINGS:
+      if (dialUpTapped) {
+        settingsSelection = (settingsSelection + SETTINGS_ITEM_COUNT - 1) % SETTINGS_ITEM_COUNT;
+        renderSettings();
+      }
+      if (dialDownTapped) {
+        settingsSelection = (settingsSelection + 1) % SETTINGS_ITEM_COUNT;
+        renderSettings();
+      }
+      if (dialPressTapped) {
+        if (settingsSelection == 0) cycleSleepTimeout();
+        else enterConfirm(CONFIRM_FACTORY_RESET);
+      }
+      if (menuTapped) enterHome();
       break;
 
     case SCREEN_CONFIRM_DELETE:
@@ -1574,14 +1929,24 @@ void handleButtons() {
         renderConfirmDelete();
       }
       if (dialPressTapped) {
-        currentScreen = SCREEN_CHOOSE_BOOK;
-        if (confirmDeleteYes) {
-          deleteSelectedBook();  // re-renders Choose Book itself
-        } else {
-          renderChooseBook();
+        if (confirmAction == CONFIRM_DELETE_BOOK) {
+          currentScreen = SCREEN_CHOOSE_BOOK;
+          if (confirmDeleteYes) deleteSelectedBook();  // re-renders Choose Book itself
+          else renderChooseBook();
+        } else if (confirmAction == CONFIRM_DELETE_BOOKMARK) {
+          currentScreen = SCREEN_BOOKMARK_SLOTS;
+          if (confirmDeleteYes) deleteSelectedBookmark();  // re-renders itself
+          else renderBookmarkSlots();
+        } else {  // CONFIRM_FACTORY_RESET
+          if (confirmDeleteYes) {
+            factoryReset();  // reboots -- does not return
+          } else {
+            currentScreen = SCREEN_SETTINGS;
+            renderSettings();
+          }
         }
       }
-      if (menuTapped) enterHome();  // cancels without deleting
+      if (menuTapped) enterHome();  // cancels without acting
       break;
   }
 
@@ -1593,7 +1958,8 @@ void handleButtons() {
 }
 
 void maybeSleep() {
-  if (millis() - lastActivity < SLEEP_AFTER_MS) return;
+  if (sleepAfterMs == 0) return;  // "Never" preset, see cycleSleepTimeout()
+  if (millis() - lastActivity < sleepAfterMs) return;
 
   // Wi-Fi is normally already off (it only runs while SCREEN_WIFI_INFO is
   // showing) -- only tear it down/restore it here if that's where we are.
@@ -1630,6 +1996,9 @@ void setup() {
 
   pinMode(EPD_POWER_PIN, OUTPUT);
   digitalWrite(EPD_POWER_PIN, HIGH);
+
+  prefs.begin("settings", false);
+  sleepAfterMs = prefs.getUInt("sleepMs", 60000);
 
   if (!LittleFS.begin(true)) {
     showMessage("LittleFS failed");

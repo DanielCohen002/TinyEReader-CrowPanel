@@ -10,13 +10,16 @@ Upload `.txt` books over Wi-Fi, read them on the e-paper screen, jump between ch
 
 - Multi-book library: each upload adds a book rather than replacing one, up to 3MB per book
 - Remembers your reading position per book, boots straight back into whichever book you read last
+- Up to 3 bookmarks per book, separate from that automatic "current place" — hold Top while reading to save/overwrite one, browse and jump to them from the Bookmarks screen (see [Bookmarks](#bookmarks) below)
 - True sequential page-up/page-down (always the actual neighboring page, computed by replaying pagination rather than an undo-last-jump stack) — see [Display driver](#display-driver)
 - Chapter skip, using a marker character a book can contain — see [Chapters](#chapters-and-the-epub-converter) below
-- Home menu: a row of three icons (Resume Last Book / Choose Book / Connect to Wi-Fi) with small labels underneath, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
-- Delete a book from Choose Book via a Yes/No confirmation dialog
+- Drop an `.epub` straight onto the upload page and it's converted to `.txt` automatically, right in the browser
+- Home menu: 5 icons (Resume Last Book / Choose Book / Bookmarks / Connect to Wi-Fi / Settings) shown 3 at a time across two pages, selection shown as a border box. Free space left in the library shows on Choose Book only (Home and Choose Book could report a hair apart due to LittleFS's own block-level accounting, so it's shown in one place, the more conservative of the two, instead of two possibly-inconsistent ones)
+- Settings screen: cycle the auto-sleep timeout (30s/1/2/5 min/Never) or factory-reset the device (wipes all books, positions, bookmarks, and settings) — see [Settings](#settings) below
+- Delete a book from Choose Book, or a bookmark from the Bookmarks screen, via the same Yes/No confirmation dialog
 - Two QR codes on the Connect to Wi-Fi screen — one auto-joins the `PocketReader` network, one links out to the project — generated from PNGs with `tools/image_to_epd.py`
 - Wi-Fi only powers on while the Connect to Wi-Fi screen is open — off the rest of the time (including at boot) to save battery
-- Light-sleeps the ESP32 and puts the e-paper panel to sleep after a minute of inactivity, wakes on any button press
+- Light-sleeps the ESP32 and puts the e-paper panel to sleep after inactivity (adjustable in Settings), wakes on any button press
 
 ## Hardware
 
@@ -41,9 +44,11 @@ Button meaning depends on which screen is showing:
 
 | | Top | Bottom | Dial rotate | Dial press |
 | --- | --- | --- | --- | --- |
-| Reading a book | Previous page (hold to repeat) | Next page (hold to repeat) | Up = previous chapter, down = next chapter | Open Home menu |
-| Home / Choose Book / delete dialog | Jump to Home (cancels the delete dialog without deleting) | On a book in Choose Book, opens the delete dialog | Move selection up/down | Select highlighted item |
+| Reading a book | Tap = previous page, hold = save/overwrite a bookmark (see [Bookmarks](#bookmarks)) | Next page | Up = previous chapter, down = next chapter | Open Home menu |
+| Home / Choose Book / Bookmarks / Settings / confirm dialog | Jump to Home (cancels the confirm dialog without acting) | On a book in Choose Book, or a bookmark in the Bookmarks screen, opens the delete confirmation | Move selection up/down | Select highlighted item |
 | Connect to Wi-Fi | Back to Home | — | — | Back to Home |
+
+Home no longer fits all 5 items in one row at the icon size used, so it's paged: dial past the 3rd item (Bookmarks) to reach the other 2 (Connect to Wi-Fi / Settings), same dial up/down as everywhere else.
 
 ## Display driver
 
@@ -72,6 +77,21 @@ py tools\epub_to_txt.py yourbook.epub
 ```
 
 -- writes `yourbook.txt` next to it; upload that the normal way. Real-world EPUBs vary a lot in how publishers structure their markup, so double-check the first book you convert with any of these; if the chapters land in odd places, note which book and it's worth revisiting the detection heuristic (shared between the browser and Python versions, since they use the same logic).
+
+## Bookmarks
+
+Separate from the automatic "current place" (which always tracks wherever you last turned a page), each book gets up to 3 explicit bookmarks. Hold **Top** while reading to save one at the current page -- it fills the first empty slot, or overwrites slot 1 once all three are used, and flashes "Bookmark N saved" briefly so you know which slot changed. Tapping Top normally (not holding) still turns to the previous page as usual; the two are told apart by how long Top stays down (`BOOKMARK_HOLD_MS`, 600ms).
+
+To use one, open the **Bookmarks** icon from Home, pick a book, then pick a slot -- each shows how far into the book it is as a percentage, or "(empty)" if unused. Opening a bookmark does **not** touch "current place"; if you keep reading forward from there, current place starts tracking again normally. Bottom on a highlighted slot deletes it, with the same Yes/No confirmation as deleting a book.
+
+## Settings
+
+Open the **Settings** icon from Home (it's on the second Home page -- see [Buttons](#hardware)). Two options today:
+
+- **Sleep timeout** -- dial press cycles through 30 sec / 1 min / 2 min / 5 min / Never. Persisted with the ESP32's own Preferences (NVS) library, not LittleFS, since it's device configuration rather than book data.
+- **Factory reset** -- wipes every book, reading position, and bookmark on the device, plus this setting itself, then reboots. Same Yes/No confirmation as deleting a book; there's no undo.
+
+Font size is deliberately not adjustable: `BOOK_MAX_LINES`/`BOOK_CHARS_PER_LINE` are derived from a fixed font, and changing it at runtime would need re-paginating the currently-open book and invalidating the page cache -- more risk than the other two settings for a first pass. A build-date readout also lives at the bottom of this screen for quick "am I on the latest firmware" checks.
 
 ## Icons and QR codes
 
@@ -128,6 +148,6 @@ Then open `http://localhost:8787` in Chrome or Edge (Web Serial requires a Chrom
 1. Flash the firmware.
 2. On the device, press the dial to open the Home menu, move to **Connect to Wi-Fi** with the dial, and press the dial to select it.
 3. Scan the Wi-Fi QR code with your phone (or connect manually to `PocketReader`, password `12345678`).
-4. Open `http://192.168.4.1` and upload a `.txt` file (or a converted EPUB — see [Chapters](#chapters-and-the-epub-converter)). It becomes the active book immediately.
+4. Open `http://192.168.4.1` and upload a `.txt` or `.epub` file (EPUBs convert automatically — see [Chapters](#chapters-and-the-epub-converter)). It becomes the active book immediately.
 5. Press the dial (or tap Top) to back out of the Wi-Fi screen when done — Wi-Fi turns off automatically.
-6. Use Top/Bottom to turn pages (hold to keep going), the dial to skip chapters, dial press for the Home menu.
+6. Use Top/Bottom to turn pages, the dial to skip chapters, dial press for the Home menu, hold Top to save a bookmark (see [Bookmarks](#bookmarks)).
