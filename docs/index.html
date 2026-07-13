@@ -6,62 +6,82 @@
   <title>TinyEReader (CrowPanel) — Flash it</title>
   <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
   <style>
+    :root { color-scheme: light dark; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      max-width: 640px;
-      margin: 3rem auto;
-      padding: 0 1.5rem;
-      line-height: 1.5;
-      color: #1a1a1a;
+      font-family: system-ui, sans-serif; line-height: 1.4; margin: 0;
+      padding: 2rem 1rem; background: #f2efe9; color: #1c1a17;
+      display: flex; justify-content: center;
     }
-    h1 { font-size: 1.4rem; }
-    esp-web-install-button {
-      display: block;
-      margin: 2rem 0;
+    .card {
+      width: 100%; max-width: 26rem; background: #fffdf9;
+      border-radius: 0.75rem; padding: 1.5rem 1.5rem 1.75rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
     }
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    .sub { color: #6b6357; font-size: 0.9rem; margin: 0 0 1.25rem; }
+    esp-web-install-button { display: block; margin: 1.25rem 0; }
     button {
-      font-size: 1.1rem;
-      padding: 0.75rem 1.5rem;
-      border-radius: 8px;
-      border: none;
-      background: #1a73e8;
-      color: white;
+      font: inherit; width: 100%; padding: 0.65rem;
+      border: none; border-radius: 0.5rem; background: #3d3527; color: #fff;
       cursor: pointer;
     }
-    button:hover { background: #1558b3; }
-    .note {
-      background: #f5f5f5;
-      border-radius: 8px;
-      padding: 1rem 1.25rem;
-      font-size: 0.95rem;
+    button:disabled { background: #b6ac9a; cursor: not-allowed; }
+    .unsupported {
+      font-size: 0.9rem; color: #b03a2e;
+      background: rgba(176, 58, 46, 0.08); border-radius: 0.5rem; padding: 0.75rem 1rem;
     }
-    code { background: #eee; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    .note {
+      background: #f6f1e6; border-radius: 0.6rem;
+      padding: 0.9rem 1.1rem; font-size: 0.85rem; color: #6b6357;
+      margin-top: 1.25rem;
+    }
+    .note strong { color: #1c1a17; }
+    .note ul { margin: 0.5rem 0 0; padding-left: 1.1rem; }
+    .note li { margin: 0.35rem 0; }
+    .links { font-size: 0.9rem; margin-top: 1.25rem; }
+    .links p { margin: 0.5rem 0; }
+    a { color: #8a6b5c; }
+    code { background: rgba(0,0,0,0.06); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.85em; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #171512; color: #ece7dc; }
+      .card { background: #201d19; box-shadow: none; }
+      .sub, .links { color: #a49b8a; }
+      button { background: #ece7dc; color: #201d19; }
+      button:disabled { background: #4a4438; color: #a49b8a; }
+      .unsupported { color: #e6a99c; background: rgba(212, 122, 106, 0.12); }
+      .note { background: #2a251e; color: #a49b8a; }
+      .note strong { color: #ece7dc; }
+      a { color: #c9b8a8; }
+      code { background: rgba(255,255,255,0.08); }
+    }
   </style>
 </head>
 <body>
-  <h1>TinyEReader — CrowPanel ESP32 E-Paper HMI 2.13"</h1>
-  <p>Flash the latest firmware directly from this page — no software to install. Plug the board in over USB, then click below.</p>
+  <div class="card">
+    <h1>TinyEReader — CrowPanel</h1>
+    <p class="sub">Flash the latest firmware directly from this page — no software to install. Plug the board in over USB, then click below.</p>
 
-  <esp-web-install-button manifest="manifest.json">
-    <button slot="activate">Connect &amp; Install</button>
-    <span slot="unsupported">
-      Your browser doesn't support Web Serial. Open this page in
-      <strong>Chrome</strong> or <strong>Edge</strong> on a desktop computer.
-    </span>
-    <span slot="not-allowed">This page needs to be loaded over HTTPS.</span>
-  </esp-web-install-button>
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate">Connect &amp; Install</button>
+      <span slot="unsupported" class="unsupported">
+        Your browser doesn't support Web Serial. Open this page in <strong>Chrome</strong> or <strong>Edge</strong> on a desktop computer.
+      </span>
+      <span slot="not-allowed" class="unsupported">This page needs to be loaded over HTTPS.</span>
+    </esp-web-install-button>
 
-  <div class="note">
-    <strong>Notes</strong>
-    <ul>
-      <li>Works in Chrome or Edge on desktop only (Web Serial isn't supported on Firefox, Safari, or mobile browsers).</li>
-      <li>This erases and reflashes the whole board — any books already on it will be wiped along with your saved place. Back up anything you care about first (see the <a href="https://github.com/DanielCohen002/TinyEReader-CrowPanel#readme">README</a>).</li>
-      <li>If the port doesn't show up, try a different USB cable/port, or close any other program (Arduino IDE, Serial Monitor) that might have it open.</li>
-    </ul>
+    <div class="note">
+      <strong>Notes</strong>
+      <ul>
+        <li>Works in Chrome or Edge on desktop only (Web Serial isn't supported on Firefox, Safari, or mobile browsers).</li>
+        <li>This erases and reflashes the whole board — any books already on it will be wiped along with your saved place. Back up anything you care about first (see the <a href="https://github.com/DanielCohen002/TinyEReader-CrowPanel#readme">README</a>).</li>
+        <li>If the port doesn't show up, try a different USB cable/port, or close any other program (Arduino IDE, Serial Monitor) that might have it open.</li>
+      </ul>
+    </div>
+
+    <div class="links">
+      <p>Converting an EPUB? The device's own upload page does this automatically, but there's also a <a href="epub-to-txt.html">standalone EPUB → TXT converter</a> if you'd rather convert ahead of time.</p>
+      <p><a href="https://github.com/DanielCohen002/TinyEReader-CrowPanel">← Back to the repo</a></p>
+    </div>
   </div>
-
-  <p>Converting an EPUB? The device's own upload page does this automatically, but there's also a <a href="epub-to-txt.html">standalone EPUB → TXT converter</a> if you'd rather convert ahead of time.</p>
-
-  <p><a href="https://github.com/DanielCohen002/TinyEReader-CrowPanel">← Back to the repo</a></p>
 </body>
 </html>

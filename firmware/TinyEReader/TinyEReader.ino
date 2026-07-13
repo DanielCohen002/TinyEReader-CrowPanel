@@ -974,10 +974,12 @@ void previousChapter() {
 void openBook(const String& name) {
   // indexChapters() does a byte-by-byte scan of the whole file, which can take
   // a couple of seconds on a large book -- show a message first so this reads
-  // as "working" rather than a frozen screen.
+  // as "working" rather than a frozen screen. Title gets its own line (rather
+  // than sharing one with "Opening") so long titles have more room before
+  // truncating -- same 26-char convention as the book/bookmark list rows.
   String title = bookTitle(name);
-  if (title.length() > 18) title = title.substring(0, 15) + "...";  // fit "Opening " + title on one line
-  showMessage("Opening " + title);
+  if (title.length() > 26) title = title.substring(0, 23) + "...";
+  showMessage("Opening\n" + title);
 
   currentBookName = name;
   saveCurrentBookName();
@@ -993,10 +995,11 @@ void openBook(const String& name) {
 // of renderPageAt() so jumping to a bookmark does NOT overwrite "current
 // place". If you keep reading forward/back from here, normal page turns
 // call renderPageAt() as usual and current place starts tracking again.
-void openBookAtBookmark(const String& name, uint32_t offset) {
+// slot is 0-based; shown to the user as 1-based.
+void openBookAtBookmark(const String& name, uint32_t offset, uint8_t slot) {
   String title = bookTitle(name);
-  if (title.length() > 18) title = title.substring(0, 15) + "...";
-  showMessage("Opening " + title);
+  if (title.length() > 26) title = title.substring(0, 23) + "...";
+  showMessage("Opening bookmark " + String(slot + 1) + "\n" + title);
 
   currentBookName = name;
   saveCurrentBookName();
@@ -1888,7 +1891,7 @@ void handleButtons() {
         renderBookmarkSlots();
       }
       if (dialPressTapped && bookmarkOffsets[bookmarkSlotSelection] != BOOKMARK_EMPTY) {
-        openBookAtBookmark(bookList[bookmarkBookSelection], bookmarkOffsets[bookmarkSlotSelection]);
+        openBookAtBookmark(bookList[bookmarkBookSelection], bookmarkOffsets[bookmarkSlotSelection], bookmarkSlotSelection);
       }
       if (backTapped && bookmarkOffsets[bookmarkSlotSelection] != BOOKMARK_EMPTY) {
         enterConfirm(CONFIRM_DELETE_BOOKMARK);
