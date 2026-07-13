@@ -100,6 +100,15 @@ constexpr size_t MAX_BOOK_SIZE = 3 * 1024 * 1024;
 uint32_t sleepAfterMs = 60000;
 const uint32_t SLEEP_PRESETS_MS[] = { 30000, 60000, 120000, 300000, 0 };
 constexpr uint8_t SLEEP_PRESETS_COUNT = 5;
+// Auto page turn: same idea as sleepAfterMs, 0 means "off". Reuses
+// sleepPresetLabel() for its "N sec"/"N min" formatting (see renderSettings()).
+uint32_t autoTurnMs = 0;
+const uint32_t AUTO_TURN_PRESETS_MS[] = { 0, 15000, 30000, 60000, 120000 };
+constexpr uint8_t AUTO_TURN_PRESETS_COUNT = 5;
+unsigned long lastPageTurnTime = 0;  // see maybeAutoTurn()
+bool invertDisplay = false;          // see toggleInvertDisplay(), applied in endFrame()
+enum SortMode : uint8_t { SORT_AZ, SORT_ZA, SORT_SIZE };
+SortMode sortMode = SORT_AZ;         // applied in listBooks() via sortBookList()
 // Book count is bounded by flash space, not an arbitrary limit -- see
 // uploadSizeLimit in handleUpload(). MAX_BOOKS is just the bookList array's
 // capacity (RAM, not flash), sized well past what could realistically fit
@@ -163,11 +172,12 @@ constexpr uint8_t BOOKMARK_SLOT_COUNT = 3;
 constexpr uint32_t BOOKMARK_EMPTY = 0xFFFFFFFF;
 uint32_t bookmarkOffsets[BOOKMARK_SLOT_COUNT];
 
-// Settings screen state. Persisted settings (currently just the sleep
-// timeout) live in NVS via Preferences, not LittleFS -- see setup() for the
-// load and cycleSleepTimeout() for the save.
+// Settings screen state. Persisted settings live in NVS via Preferences, not
+// LittleFS -- see setup() for the load and each cycle*()/toggle*() function
+// for the save.
 Preferences prefs;
-constexpr uint8_t SETTINGS_ITEM_COUNT = 2;  // 0 = sleep timeout, 1 = factory reset
+// 0 = sleep timeout, 1 = auto page turn, 2 = invert display, 3 = book sort, 4 = factory reset
+constexpr uint8_t SETTINGS_ITEM_COUNT = 5;
 uint8_t settingsSelection = 0;
 
 String currentBookName;  // filename only, e.g. "MyNovel.txt" -- lives under /books/
@@ -799,6 +809,15 @@ void beginFrame() {
 }
 
 void endFrame() {
+  // Invert display: EPD_DisplayImage() already sends ~ImageBW[i] to the
+  // panel (see EPD_Init.cpp) -- flipping the whole software framebuffer
+  // here first, before that, is the single cheap place to support a
+  // global invert without touching any of the individual draw calls
+  // scattered through this file. ALLSCREEN_BYTES is tiny (~3.8KB for this
+  // panel), so a full pass over it every frame is negligible.
+  if (invertDisplay) {
+    for (uint32_t i = 0; i < ALLSCREEN_BYTES; i++) ImageBW[i] = ~ImageBW[i];
+  }
   EPD_DisplayImage(ImageBW);
   EPD_PartUpdate();
   EPD_SyncOldData(ImageBW);
@@ -869,6 +888,41 @@ void reopenBookAt(uint32_t offset) {
   book.seek(pageStart);
 }
 
+// Simple insertion sort -- bookCount is capped at MAX_BOOKS (64), so even
+// the O(n^2) worst case is negligible, and SORT_SIZE re-opening each file
+// just to read its size is cheap at that count too. Applies to bookList in
+// place; called from listBooks() so every screen that lists books (Choose
+// Book, Bookmarks, and the web upload page's library list) sees the same
+// order without each needing its own sort call.
+void sortBookList() {
+  size_t sizes[MAX_BOOKS];
+  if (sortMode == SORT_SIZE) {
+    for (uint8_t i = 0; i < bookCount; i++) {
+      File f = LittleFS.open(bookPath(bookList[i]), "r");
+      sizes[i] = f ? f.size() : 0;
+      if (f) f.close();
+    }
+  }
+
+  for (uint8_t i = 1; i < bookCount; i++) {
+    String name = bookList[i];
+    size_t size = (sortMode == SORT_SIZE) ? sizes[i] : 0;
+    int16_t j = (int16_t)i - 1;
+    while (j >= 0) {
+      bool shouldMoveRight;
+      if (sortMode == SORT_ZA) shouldMoveRight = bookList[j] < name;
+      else if (sortMode == SORT_SIZE) shouldMoveRight = sizes[j] < size;  // largest first
+      else shouldMoveRight = bookList[j] > name;                          // SORT_AZ
+      if (!shouldMoveRight) break;
+      bookList[j + 1] = bookList[j];
+      if (sortMode == SORT_SIZE) sizes[j + 1] = sizes[j];
+      j--;
+    }
+    bookList[j + 1] = name;
+    if (sortMode == SORT_SIZE) sizes[j + 1] = size;
+  }
+}
+
 void listBooks() {
   bookCount = 0;
   bookFileTotal = 0;
@@ -890,6 +944,8 @@ void listBooks() {
     }
     f = dir.openNextFile();
   }
+
+  sortBookList();
 }
 
 void renderChooseBook();
@@ -1398,6 +1454,26 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
 // Split out from renderPageAt() so opening a book at a bookmark can render
 // without touching "current place" (see openBookAtBookmark()) -- everything
 // except the savePosition() call at the end.
+// 1-2px progress bar hugging the very bottom edge of the screen, filled
+// proportionally to how far `offset` is through the file -- independent of
+// how many lines this particular page has, so it stays in a fixed spot.
+// BOOK_MAX_LINES already uses the screen down to its last pixel of slack
+// (see the comment there), but the glyphs themselves are BOOK_FONT (16px)
+// tall against a BOOK_LINE_HEIGHT of 20px, so the last text row's own
+// glyphs end a few px above the bottom edge -- plenty of room for this
+// without eating a line.
+constexpr uint16_t PROGRESS_BAR_THICKNESS = 2;
+void drawProgressBar(uint32_t offset, size_t size) {
+  if (size == 0) return;
+  uint16_t barLeft = BOOK_LEFT_MARGIN;
+  uint16_t barWidth = EPD_W - 2 * BOOK_LEFT_MARGIN;
+  uint16_t filled = (uint16_t)(((uint64_t)offset * barWidth) / size);
+  uint16_t y = EPD_H - PROGRESS_BAR_THICKNESS;
+  for (uint16_t t = 0; t < PROGRESS_BAR_THICKNESS; t++) {
+    EPD_DrawLine(barLeft, y + t, barLeft + filled, y + t, BLACK);
+  }
+}
+
 void renderPageAtCore(uint32_t offset) {
   reopenBookAt(offset);
   if (!book) {
@@ -1415,9 +1491,24 @@ void renderPageAtCore(uint32_t offset) {
     EPD_ShowString(BOOK_LEFT_MARGIN, BOOK_TOP_MARGIN + (i * BOOK_LINE_HEIGHT), lines[i].c_str(), BLACK, BOOK_FONT);
   }
 
+  // Progress indicator: a percentage tacked onto the end of the last
+  // visible line, like an extra trailing word, rather than reserving a
+  // line of its own -- if that line happens to run all the way to the
+  // right margin already, this can rarely overlap it; accepted trade-off
+  // of not costing a line. 8px/char is this font's fixed glyph width (see
+  // BOOK_CHARS_PER_LINE).
+  if (fileSize > 0 && lineCount > 0) {
+    String pctText = String((uint8_t)(((uint64_t)offset * 100) / fileSize)) + "%";
+    uint16_t pctX = EPD_W - BOOK_LEFT_MARGIN - (uint16_t)(pctText.length() * 8);
+    uint16_t pctY = BOOK_TOP_MARGIN + (lineCount - 1) * BOOK_LINE_HEIGHT;
+    EPD_ShowString(pctX, pctY, pctText.c_str(), BLACK, BOOK_FONT);
+  }
+  drawProgressBar(offset, fileSize);
+
   endFrame();
 
   touchActivity();
+  lastPageTurnTime = millis();  // see maybeAutoTurn()
 }
 
 void renderPageAt(uint32_t offset) {
@@ -1698,6 +1789,18 @@ String sleepPresetLabel(uint32_t ms) {
   return String(ms / 60000) + " min";
 }
 
+String sortModeLabel(SortMode mode) {
+  switch (mode) {
+    case SORT_ZA: return "Z-A";
+    case SORT_SIZE: return "Size";
+    default: return "A-Z";
+  }
+}
+
+// 6 rows is the max that fits this screen (MENU_TOP_MARGIN=4, MENU_LINE_HEIGHT=20,
+// 122px tall -- same limit as BOOK_MAX_LINES's math), so this is exactly full:
+// header + 5 selectable rows, no room left for anything else (e.g. a build-date
+// footer, which an earlier version of this screen had).
 void renderSettings() {
   beginFrame();
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, "Settings", BLACK, MENU_FONT);
@@ -1706,11 +1809,20 @@ void renderSettings() {
   sleepLabel += sleepPresetLabel(sleepAfterMs);
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + MENU_LINE_HEIGHT, sleepLabel.c_str(), BLACK, MENU_FONT);
 
-  String resetLabel = (settingsSelection == 1) ? "> Factory reset" : "  Factory reset";
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, resetLabel.c_str(), BLACK, MENU_FONT);
+  String autoTurnLabel = (settingsSelection == 1) ? "> Auto-turn: " : "  Auto-turn: ";
+  autoTurnLabel += (autoTurnMs == 0) ? "Off" : sleepPresetLabel(autoTurnMs);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 2 * MENU_LINE_HEIGHT, autoTurnLabel.c_str(), BLACK, MENU_FONT);
 
-  String buildLabel = "Build: " + String(__DATE__);
-  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, buildLabel.c_str(), BLACK, MENU_FONT);
+  String invertLabel = (settingsSelection == 2) ? "> Invert: " : "  Invert: ";
+  invertLabel += invertDisplay ? "On" : "Off";
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 3 * MENU_LINE_HEIGHT, invertLabel.c_str(), BLACK, MENU_FONT);
+
+  String sortLabel = (settingsSelection == 3) ? "> Sort: " : "  Sort: ";
+  sortLabel += sortModeLabel(sortMode);
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 4 * MENU_LINE_HEIGHT, sortLabel.c_str(), BLACK, MENU_FONT);
+
+  String resetLabel = (settingsSelection == 4) ? "> Factory reset" : "  Factory reset";
+  EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN + 5 * MENU_LINE_HEIGHT, resetLabel.c_str(), BLACK, MENU_FONT);
 
   endFrame();
 }
@@ -1735,6 +1847,40 @@ void cycleSleepTimeout() {
   index = (index + 1) % SLEEP_PRESETS_COUNT;
   sleepAfterMs = SLEEP_PRESETS_MS[index];
   prefs.putUInt("sleepMs", sleepAfterMs);
+  renderSettings();
+}
+
+// Same idea as cycleSleepTimeout(). lastPageTurnTime is reset here so
+// turning this on doesn't immediately fire using a stale elapsed time --
+// see maybeAutoTurn().
+void cycleAutoTurn() {
+  uint8_t index = 0;
+  for (uint8_t i = 0; i < AUTO_TURN_PRESETS_COUNT; i++) {
+    if (AUTO_TURN_PRESETS_MS[i] == autoTurnMs) {
+      index = i;
+      break;
+    }
+  }
+  index = (index + 1) % AUTO_TURN_PRESETS_COUNT;
+  autoTurnMs = AUTO_TURN_PRESETS_MS[index];
+  prefs.putUInt("autoTurnMs", autoTurnMs);
+  lastPageTurnTime = millis();
+  renderSettings();
+}
+
+// Forces a full re-init on the next frame so the panel does a clean
+// white-fill-and-clear cycle instead of partial-updating straight into the
+// new polarity, which would otherwise ghost.
+void toggleInvertDisplay() {
+  invertDisplay = !invertDisplay;
+  prefs.putBool("invert", invertDisplay);
+  epdNeedsFullInit = true;
+  renderSettings();
+}
+
+void cycleSortMode() {
+  sortMode = (SortMode)((sortMode + 1) % 3);
+  prefs.putUChar("sortMode", sortMode);
   renderSettings();
 }
 
@@ -1916,8 +2062,13 @@ void handleButtons() {
         renderSettings();
       }
       if (dialPressTapped) {
-        if (settingsSelection == 0) cycleSleepTimeout();
-        else enterConfirm(CONFIRM_FACTORY_RESET);
+        switch (settingsSelection) {
+          case 0: cycleSleepTimeout(); break;
+          case 1: cycleAutoTurn(); break;
+          case 2: toggleInvertDisplay(); break;
+          case 3: cycleSortMode(); break;
+          default: enterConfirm(CONFIRM_FACTORY_RESET); break;
+        }
       }
       if (menuTapped) enterHome();
       break;
@@ -1958,6 +2109,18 @@ void handleButtons() {
   lastDialDown = nowDialDown;
   lastDialUp = nowDialUp;
   lastDialPress = nowDialPress;
+}
+
+// While enabled and reading, advances to the next page once autoTurnMs has
+// passed since the last page change of any kind (renderPageAtCore() resets
+// lastPageTurnTime on every render, whether from a real page turn, a
+// chapter jump, or opening a book/bookmark). nextPage() is already a no-op
+// at the end of the book, so this doesn't need its own end-of-book check.
+void maybeAutoTurn() {
+  if (autoTurnMs == 0) return;
+  if (currentScreen != SCREEN_READING) return;
+  if (millis() - lastPageTurnTime < autoTurnMs) return;
+  nextPage();
 }
 
 void maybeSleep() {
@@ -2002,6 +2165,9 @@ void setup() {
 
   prefs.begin("settings", false);
   sleepAfterMs = prefs.getUInt("sleepMs", 60000);
+  autoTurnMs = prefs.getUInt("autoTurnMs", 0);
+  invertDisplay = prefs.getBool("invert", false);
+  sortMode = (SortMode)prefs.getUChar("sortMode", SORT_AZ);
 
   if (!LittleFS.begin(true)) {
     showMessage("LittleFS failed");
@@ -2033,6 +2199,7 @@ void setup() {
 void loop() {
   server.handleClient();
   handleButtons();
+  maybeAutoTurn();
   maybeSleep();
   delay(20);
 }
