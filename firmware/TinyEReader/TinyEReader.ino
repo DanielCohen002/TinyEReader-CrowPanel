@@ -112,10 +112,22 @@ enum SortMode : uint8_t { SORT_AZ, SORT_ZA, SORT_SIZE };
 SortMode sortMode = SORT_AZ;         // applied in listBooks() via sortBookList()
 // Reading-screen progress indicator -- one of these four, never more than
 // one at a time (see renderPageAtCore()). PROGRESS_FRACTION shows "current
-// chapter / total chapters", not a page count -- see progressIndicatorText()
-// for why.
+// page / total pages" -- see computeTotalPageCount()/pageNumberForOffset()
+// for how, and totalPageCount/currentPageNumber below for the cost
+// trade-off of keeping them accurate.
 enum ProgressMode : uint8_t { PROGRESS_PERCENT, PROGRESS_FRACTION, PROGRESS_BAR, PROGRESS_OFF };
 ProgressMode progressMode = PROGRESS_PERCENT;
+// Page-fraction tracking for the currently-open-for-reading book (the
+// Bookmarks screen keeps its own separate bookmarkTotalPages/
+// bookmarkSlotPages instead of these, since it can be browsing a different
+// book's bookmarks while a different one is actually open for reading).
+// Both are only kept accurate while progressMode == PROGRESS_FRACTION --
+// see computeTotalPageCount()/pageNumberForOffset() for why that guard
+// exists (a real pagination replay, not free) and nextPage()/
+// previousPage()/nextChapter()/previousChapter()/openBook()/
+// openBookAtBookmark()/cycleProgressMode() for where they're updated.
+uint32_t totalPageCount = 1;
+uint32_t currentPageNumber = 1;
 // Book count is bounded by flash space, not an arbitrary limit -- see
 // uploadSizeLimit in handleUpload(). MAX_BOOKS is just the bookList array's
 // capacity (RAM, not flash), sized well past what could realistically fit
@@ -179,6 +191,15 @@ uint8_t bookmarkSlotSelection = 0;
 constexpr uint8_t BOOKMARK_SLOT_COUNT = 3;
 constexpr uint32_t BOOKMARK_EMPTY = 0xFFFFFFFF;
 uint32_t bookmarkOffsets[BOOKMARK_SLOT_COUNT];
+// Page-fraction cache for the Bookmarks screen (PROGRESS_FRACTION only --
+// see renderBookmarkSlots()). Computed once in enterBookmarkSlots(), not on
+// every render, since moving the cursor between the 3 slots re-renders far
+// more often than the book being browsed actually changes, and each of
+// these numbers is a real pagination sweep (see computeTotalPageCount()/
+// pageNumberForOffset()) through a book that isn't necessarily the one
+// currently open for reading.
+uint32_t bookmarkTotalPages = 0;
+uint32_t bookmarkSlotPages[BOOKMARK_SLOT_COUNT];
 
 // Settings screen state. Persisted settings live in NVS via Preferences, not
 // LittleFS -- see setup() for the load and each cycle*()/toggle*() function
@@ -1006,6 +1027,9 @@ void deleteSelectedBook() {
 
 void renderPageAt(uint32_t offset);
 void renderPageAtCore(uint32_t offset);
+uint32_t computeTotalPageCount();
+uint32_t pageNumberForOffset(uint32_t offset);
+void refreshPageTracking(uint32_t offset);
 
 // Scans the whole book once for form-feed chapter markers and records their
 // byte offsets. Called once per book-open, not per page -- a full linear
@@ -1033,6 +1057,10 @@ void indexChapters() {
 void nextChapter() {
   for (uint16_t i = 0; i < chapterCount; i++) {
     if (chapterOffsets[i] > pageStart) {
+      // A chapter skip is a jump, not a sequential step, so currentPageNumber
+      // needs a fresh sweep rather than nextPage()'s cheap +1 -- see
+      // pageNumberForOffset()'s own comment.
+      if (progressMode == PROGRESS_FRACTION) currentPageNumber = pageNumberForOffset(chapterOffsets[i]);
       renderPageAt(chapterOffsets[i]);
       return;
     }
@@ -1042,11 +1070,15 @@ void nextChapter() {
 void previousChapter() {
   for (int16_t i = (int16_t)chapterCount - 1; i >= 0; i--) {
     if (chapterOffsets[i] < pageStart) {
+      if (progressMode == PROGRESS_FRACTION) currentPageNumber = pageNumberForOffset(chapterOffsets[i]);
       renderPageAt(chapterOffsets[i]);
       return;
     }
   }
-  if (chapterCount > 0) renderPageAt(chapterOffsets[0]);
+  if (chapterCount > 0) {
+    if (progressMode == PROGRESS_FRACTION) currentPageNumber = pageNumberForOffset(chapterOffsets[0]);
+    renderPageAt(chapterOffsets[0]);
+  }
 }
 
 void openBook(const String& name) {
@@ -1063,6 +1095,7 @@ void openBook(const String& name) {
   uint32_t saved = loadSavedPosition(name);
   reopenBookAt(saved);
   indexChapters();
+  refreshPageTracking(saved);
   currentScreen = SCREEN_READING;
   renderPageAt(saved);
 }
@@ -1081,6 +1114,7 @@ void openBookAtBookmark(const String& name, uint32_t offset, uint8_t slot) {
   saveCurrentBookName();
   reopenBookAt(offset);
   indexChapters();
+  refreshPageTracking(offset);
   currentScreen = SCREEN_READING;
   renderPageAtCore(offset);
 }
@@ -1471,22 +1505,83 @@ uint32_t findPreviousPageStart(uint32_t currentStart) {
   return previousStart;
 }
 
+// Full sweep -- how many pages does the currently-open book (whatever
+// `book`/fileSize point to) paginate into? Expensive on a large book (same
+// order of cost as indexChapters(), but per-line word-wrap work instead of
+// a byte scan) -- only ever called while PROGRESS_FRACTION is actually
+// selected, not unconditionally on every book-open.
+uint32_t computeTotalPageCount() {
+  if (!book || fileSize == 0) return 1;
+  uint32_t count = 0;
+  uint32_t pos = 0;
+  while (true) {
+    count++;
+    if (pos >= fileSize) break;
+    uint32_t next = computePageEnd(pos, nullptr, nullptr);
+    if (next <= pos) break;  // malformed-input safety net
+    pos = next;
+  }
+  return count;
+}
+
+// Partial sweep -- which 1-based page number does `offset` fall on, in the
+// currently-open book? Cheaper than computeTotalPageCount() since it can
+// stop as soon as it passes `offset` instead of covering the whole book,
+// but still O(offset) -- used for jumps (chapter skip, book/bookmark open),
+// not every page turn (see currentPageNumber's own comment).
+uint32_t pageNumberForOffset(uint32_t offset) {
+  if (!book) return 1;
+  uint32_t count = 0;
+  uint32_t pos = 0;
+  while (true) {
+    count++;
+    if (pos >= offset) break;
+    uint32_t next = computePageEnd(pos, nullptr, nullptr);
+    if (next <= pos) break;
+    pos = next;
+  }
+  return count;
+}
+
+// Refreshes totalPageCount/currentPageNumber for currentBookName at
+// `offset` -- a full sweep, so this only actually does anything while
+// PROGRESS_FRACTION is selected (see those globals' own comment). Called
+// whenever a book is (re)opened (openBook(), openBookAtBookmark(), the
+// initial boot in setup()) and when switching Settings -- Progress to
+// Fraction mode.
+//
+// Always reopens currentBookName itself first, rather than trusting `book`
+// to already be pointing at it -- the Bookmarks screen temporarily repoints
+// the shared `book`/fileSize at whatever book it's browsing (see
+// enterBookmarkSlots()), so without this, cycling into Fraction mode via
+// Settings right after browsing a different book's bookmarks would sweep
+// the wrong file's content against the real active book's `pageStart`. The
+// extra reopen is cheap (a file open + seek) next to the sweep itself, so
+// this costs nothing extra when called right after openBook()'s own
+// reopenBookAt() -- just redundant, not wrong.
+void refreshPageTracking(uint32_t offset) {
+  if (progressMode != PROGRESS_FRACTION) return;
+  if (currentBookName.length() == 0) {
+    totalPageCount = 1;
+    currentPageNumber = 1;
+    return;
+  }
+  reopenBookAt(offset);
+  totalPageCount = computeTotalPageCount();
+  currentPageNumber = pageNumberForOffset(offset);
+}
+
 // Text for the reading-screen progress indicator, per progressMode -- ""
 // for PROGRESS_OFF and PROGRESS_BAR (the bar is drawn separately, see
 // drawProgressBar() and its call site in renderPageAtCore(), and is
-// mutually exclusive with the corner text). Fraction mode shows "current
-// chapter / total chapters", not a page count -- an accurate page-of-total
-// would need a full-book pagination sweep (there's no cheap way to get
-// one; see the README).
+// mutually exclusive with the corner text). Fraction mode reads
+// currentPageNumber/totalPageCount rather than recomputing them here --
+// see those globals' own comment for who's responsible for keeping them
+// in sync with `offset`.
 String progressIndicatorText(uint32_t offset) {
   if (progressMode == PROGRESS_OFF || progressMode == PROGRESS_BAR) return "";
   if (progressMode == PROGRESS_FRACTION) {
-    uint16_t chapterIndex = 0;
-    for (uint16_t i = 0; i < chapterCount; i++) {
-      if (chapterOffsets[i] <= offset) chapterIndex = i;
-      else break;
-    }
-    return String(chapterIndex + 1) + "/" + String(chapterCount);
+    return String(currentPageNumber) + "/" + String(totalPageCount);
   }
   if (fileSize == 0) return "";
   return String((uint8_t)(((uint64_t)offset * 100) / fileSize)) + "%";
@@ -1575,11 +1670,16 @@ void renderPageAt(uint32_t offset) {
 
 void nextPage() {
   if (!book || pageEnd >= fileSize) return;
+  // Sequential move, so currentPageNumber just steps by one instead of a
+  // fresh pageNumberForOffset() sweep -- see its own comment for why that
+  // matters.
+  if (progressMode == PROGRESS_FRACTION) currentPageNumber++;
   renderPageAt(pageEnd);
 }
 
 void previousPage() {
   if (!book || pageStart == 0) return;
+  if (progressMode == PROGRESS_FRACTION) currentPageNumber--;
   renderPageAt(findPreviousPageStart(pageStart));
 }
 
@@ -1715,17 +1815,26 @@ void renderBookmarkSlots() {
   String title = truncateForRow(bookTitle(bookList[bookmarkBookSelection]));
   EPD_ShowString(MENU_LEFT_MARGIN, MENU_TOP_MARGIN, title.c_str(), BLACK, MENU_FONT);
 
+  bool showFraction = (progressMode == PROGRESS_FRACTION);
+
   // Percent-through-book is cheap (just the file size, no full scan) and
-  // more useful at a glance here than a raw byte offset.
-  File f = LittleFS.open(bookPath(bookList[bookmarkBookSelection]), "r");
-  size_t size = f ? f.size() : 0;
-  if (f) f.close();
+  // more useful at a glance here than a raw byte offset -- only needed
+  // when not showing the page fraction instead (already computed in
+  // enterBookmarkSlots(), see bookmarkTotalPages/bookmarkSlotPages).
+  size_t size = 0;
+  if (!showFraction) {
+    File f = LittleFS.open(bookPath(bookList[bookmarkBookSelection]), "r");
+    size = f ? f.size() : 0;
+    if (f) f.close();
+  }
 
   for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
     String label = (i == bookmarkSlotSelection) ? "> " : "  ";
     label += String(i + 1) + ": ";
     if (bookmarkOffsets[i] == BOOKMARK_EMPTY) {
       label += "(empty)";
+    } else if (showFraction) {
+      label += String(bookmarkSlotPages[i]) + "/" + String(bookmarkTotalPages);
     } else {
       uint8_t pct = (size > 0) ? (uint8_t)(((uint64_t)bookmarkOffsets[i] * 100) / size) : 0;
       label += String(pct) + "%";
@@ -1738,6 +1847,24 @@ void renderBookmarkSlots() {
 void enterBookmarkSlots() {
   loadBookmarks(bookList[bookmarkBookSelection], bookmarkOffsets);
   bookmarkSlotSelection = 0;
+
+  if (progressMode == PROGRESS_FRACTION) {
+    // Temporarily points the shared `book`/fileSize at this bookmark's own
+    // book to reuse the same pagination sweep the reading screen uses --
+    // safe outside SCREEN_READING, since reopenBookAt() always freshly
+    // reopens the correct file before anything reads `book`/fileSize again
+    // (see its call at the top of renderPageAtCore()), regardless of what
+    // they were left pointing to here.
+    if (book) book.close();
+    book = LittleFS.open(bookPath(bookList[bookmarkBookSelection]), "r");
+    fileSize = book ? book.size() : 0;
+
+    bookmarkTotalPages = computeTotalPageCount();
+    for (uint8_t i = 0; i < BOOKMARK_SLOT_COUNT; i++) {
+      bookmarkSlotPages[i] = (bookmarkOffsets[i] != BOOKMARK_EMPTY) ? pageNumberForOffset(bookmarkOffsets[i]) : 0;
+    }
+  }
+
   currentScreen = SCREEN_BOOKMARK_SLOTS;
   renderBookmarkSlots();
 }
@@ -1957,6 +2084,11 @@ void cycleSortMode() {
 void cycleProgressMode() {
   progressMode = (ProgressMode)((progressMode + 1) % 4);
   prefs.putUChar("progressMode", progressMode);
+  // Only actually sweeps if the new mode is Fraction (see
+  // refreshPageTracking()) -- otherwise switching away from Fraction and
+  // back later would show whatever currentPageNumber/totalPageCount were
+  // last left at, possibly for a page you've since turned away from.
+  refreshPageTracking(pageStart);
   renderSettings();
 }
 
@@ -2272,6 +2404,7 @@ void setup() {
   uint32_t saved = currentBookName.length() > 0 ? loadSavedPosition(currentBookName) : 0;
   reopenBookAt(saved);
   indexChapters();
+  refreshPageTracking(saved);
   currentScreen = SCREEN_HOME;
   renderHome();
 }
